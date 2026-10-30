@@ -1,4 +1,4 @@
-"""OpenGL 3.3 bounding-box queries for the DS2 map viewer.
+"""OpenGL 3.3 bounding-box queries against the map viewer's reversed-Z depth.
 
 Import after configuring pyglet's GL options, and create/delete with the owning
 GL context current. Query results are ready-only diagnostics, not CPU culling
@@ -48,7 +48,7 @@ class OcclusionQueries:
     The caller must exclude eye-containing and near-plane-intersecting boxes,
     and issue against the current frame's accumulated opaque depth. After
     issue(), invalidate render-state caches and explicitly rebind the main
-    shader. The helper leaves color writes enabled, depth comparison GL_LESS,
+    shader. The helper leaves color writes enabled, depth comparison GL_GREATER,
     no program bound and VAO zero; other modified state is caller-owned.
     """
 
@@ -113,7 +113,7 @@ class OcclusionQueries:
             self.program['mvp'] = mvp
             gl.glBindVertexArray(self._vao)
             gl.glEnable(gl.GL_DEPTH_TEST)
-            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glDepthFunc(gl.GL_GEQUAL)
             gl.glDepthMask(gl.GL_FALSE)
             gl.glColorMask(gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE, gl.GL_FALSE)
             gl.glDisable(gl.GL_CULL_FACE)
@@ -140,7 +140,7 @@ class OcclusionQueries:
                 gl.glColorMask(gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE, gl.GL_TRUE)
             finally:
                 try:
-                    gl.glDepthFunc(gl.GL_LESS)
+                    gl.glDepthFunc(gl.GL_GREATER)
                 finally:
                     try:
                         ShaderProgram.stop()

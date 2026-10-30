@@ -48,10 +48,13 @@ class MapScene:
 
 
 def _frustum_planes(clip_matrix):
-    """OpenGL -w <= x,y,z <= w; pyglet matrices are column-major."""
-    return tuple(tuple(clip_matrix[column*4+3] + sign*clip_matrix[column*4+axis]
-                       for column in range(4))
-                 for axis in range(3) for sign in (1, -1))
+    """OpenGL zero-to-one depth: -w <= x,y <= w, 0 <= z <= w."""
+    sides = tuple(tuple(clip_matrix[column*4+3] + sign*clip_matrix[column*4+axis]
+                        for column in range(4))
+                  for axis in range(2) for sign in (1, -1))
+    return sides + (
+        tuple(clip_matrix[column*4+2] for column in range(4)),
+        tuple(clip_matrix[column*4+3] - clip_matrix[column*4+2] for column in range(4)))
 
 
 def _aabb_in_frustum(low, high, planes):

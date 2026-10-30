@@ -4,7 +4,8 @@ import math
 from types import SimpleNamespace
 import unittest
 
-from view_ds2 import MapViewer, _camera_forward, _map_clip_planes
+from ds2_scene import visible_mesh_indices
+from view_ds2 import MapViewer, _camera_forward, _map_clip_planes, _map_projection
 from pyglet.math import Mat4, Vec3, Vec4
 from pyglet.window import key
 
@@ -35,10 +36,10 @@ class MapCameraTests(unittest.TestCase):
 
     def assert_visible_depth(self, eye, forward, low, high, depth):
         near, far = _map_clip_planes(eye, forward, low, high)
-        projection = Mat4.perspective_projection(1., near, far, fov=50)
+        projection = _map_projection(1., near, far)
         view = Mat4.look_at(eye, eye+forward, Vec3(0, 0, 1))
         clip = projection @ view @ Vec4(*(eye+forward*depth), 1)
-        self.assertGreater(clip.z/clip.w, -1.)
+        self.assertGreater(clip.z/clip.w, 0.)
         self.assertLess(clip.z/clip.w, 1.)
 
     def test_zoom_inside_large_map_retains_nearby_surfaces(self):
@@ -64,13 +65,6 @@ class MapCameraTests(unittest.TestCase):
                 self.assert_visible_depth(Vec3(0, y, 0), Vec3(0, 1, 0),
                                           low, high, 99.-y)
 
-    def test_outside_bounds_keeps_tight_depth_precision(self):
-        near, far = _map_clip_planes(Vec3(0, -10000, 0), Vec3(0, 1, 0),
-                                     Vec3(-100, -100, -100), Vec3(100, 100, 100))
-        self.assertLess(near, 9900.)
-        self.assertGreater(far, 10100.)
-        self.assertLess(far/near, 1.1)
-
     def test_draw_distance_caps_depth_even_when_map_is_beyond_it(self):
         eye, forward = Vec3(0, -10000, 0), Vec3(0, 1, 0)
         low, high = Vec3(-100, -100, -100), Vec3(100, 100, 100)
@@ -81,12 +75,27 @@ class MapCameraTests(unittest.TestCase):
                 self.assertEqual(far, limit)
                 self.assertGreater(near, 0.)
                 self.assertLess(near, far)
-                projection = Mat4.perspective_projection(1., near, far, fov=50)
+                projection = _map_projection(1., near, far)
                 inside = projection @ view @ Vec4(*(eye+forward*((near+far)*.5)), 1)
                 outside = projection @ view @ Vec4(*(eye+forward*(far+1.)), 1)
-                self.assertGreater(inside.z/inside.w, -1.)
+                self.assertGreater(inside.z/inside.w, 0.)
                 self.assertLess(inside.z/inside.w, 1.)
-                self.assertGreater(outside.z/outside.w, 1.)
+                self.assertLess(outside.z/outside.w, 0.)
+
+    def test_frustum_keeps_depth_boundaries_and_rejects_both_exteriors(self):
+        meshes = [
+            dict(bounds_min=(x-.01, -.01, -depth),
+                 bounds_max=(x+.01, .01, -depth))
+            for x, depth in ((0., .25), (0., .5), (0., 2.), (0., 10.),
+                             (0., 10.1), (0., -1.), (100., 2.))
+        ]
+        leaf = dict(leaf=True, bounds_min=(-1., -1., -11.),
+                    bounds_max=(101., 1., 1.), mesh_indices=tuple(range(len(meshes))))
+        projection = _map_projection(1., .5, 10.)
+        for nodes in ([], [leaf]):
+            with self.subTest(vistree=bool(nodes)):
+                metadata = dict(meshes=meshes, vistree=nodes)
+                self.assertEqual(visible_mesh_indices(metadata, projection), {1, 2, 3})
 
 
 if __name__ == '__main__':

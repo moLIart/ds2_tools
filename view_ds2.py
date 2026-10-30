@@ -1,7 +1,7 @@
 """Native DS2 0.8 map viewer: albedo, baked lightmaps and vertex lighting.
 
 Run: python ds2_research/view_ds2.py [MAP.ds2]
-Requires the same requirements-viewer.txt and OpenGL 3.3 as the model viewer.
+Requires requirements-viewer.txt and OpenGL 3.3 with GL_ARB_clip_control (or 4.5).
 """
 
 import argparse
@@ -119,6 +119,16 @@ def _map_clip_planes(eye, forward, bounds_min, bounds_max, draw_distance=None):
     return near, far
 
 
+def _map_projection(aspect, near, far):
+    """Right-handed, finite reversed-Z: near maps to 1, far maps to 0."""
+    scale = 1. / math.tan(math.radians(50.)*.5)
+    depth = near / (far-near)
+    return Mat4(scale/aspect, 0., 0., 0.,
+                0., scale, 0., 0.,
+                0., 0., depth, -1.,
+                0., 0., far*depth, 0.)
+
+
 def _mesh_distance_squared(mesh, eye):
     """Distance to the world-space AABB center; instance transforms are baked in."""
     low, high = mesh['bounds_min'], mesh['bounds_max']
@@ -143,12 +153,75 @@ _BLEND_FUNCTIONS = {
 }
 
 
+class _MapFramebuffer:
+    """4x MSAA color and floating-point depth, resolved directly into the window."""
+
+    def __init__(self):
+        self.framebuffer = gl.GLuint()
+        self.attachments = (gl.GLuint * 2)()
+        self.size = (0, 0)
+        max_samples = gl.GLint()
+        gl.glGetIntegerv(gl.GL_MAX_SAMPLES, ctypes.byref(max_samples))
+        if max_samples.value < 4:
+            raise RuntimeError('Map viewer requires at least 4x MSAA support')
+        try:
+            gl.glGenFramebuffers(1, ctypes.byref(self.framebuffer))
+            gl.glGenRenderbuffers(2, self.attachments)
+        except BaseException:
+            self.delete()
+            raise
+
+    def bind(self, width, height):
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.framebuffer)
+        if self.size == (width, height):
+            return
+        try:
+            for renderbuffer, attachment, format_ in (
+                    (self.attachments[0], gl.GL_COLOR_ATTACHMENT0, gl.GL_RGBA8),
+                    (self.attachments[1], gl.GL_DEPTH_ATTACHMENT, gl.GL_DEPTH_COMPONENT32F)):
+                gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, renderbuffer)
+                gl.glRenderbufferStorageMultisample(gl.GL_RENDERBUFFER, 4, format_, width, height)
+                gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, attachment,
+                                            gl.GL_RENDERBUFFER, renderbuffer)
+            status = gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER)
+            if status != gl.GL_FRAMEBUFFER_COMPLETE:
+                raise RuntimeError(f'Map framebuffer incomplete: 0x{status:X}')
+            self.size = (width, height)
+        except BaseException:
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+            raise
+        finally:
+            gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, 0)
+
+    def blit(self, y):
+        width, height = self.size
+        try:
+            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, self.framebuffer)
+            gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+            gl.glBlitFramebuffer(0, 0, width, height, 0, y, width, y+height,
+                                 gl.GL_COLOR_BUFFER_BIT, gl.GL_NEAREST)
+        finally:
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+    def delete(self):
+        gl.glDeleteRenderbuffers(2, self.attachments)
+        gl.glDeleteFramebuffers(1, ctypes.byref(self.framebuffer))
+        self.framebuffer = gl.GLuint()
+        self.attachments = (gl.GLuint * 2)()
+        self.size = (0, 0)
+
+
 class MapViewer(pyglet.window.Window):
     def __init__(self, path=None, *, mode=0, screenshot=None, occlusion=False):
-        config = gl.Config(double_buffer=True, depth_size=24, major_version=3, minor_version=3)
+        config = gl.Config(double_buffer=True, depth_size=0, sample_buffers=0, samples=0,
+                           major_version=3, minor_version=3)
         self._camera_buttons = 0
         super().__init__(width=1280, height=850, caption='DS2 Map Viewer',
                          resizable=True, config=config, file_drops=True, vsync=False)
+        if not (gl.gl_info.have_version(4, 5)
+                or gl.gl_info.have_extension('GL_ARB_clip_control')):
+            super().close()
+            raise RuntimeError('Map viewer requires OpenGL 4.5 or GL_ARB_clip_control for reversed-Z')
         self.set_minimum_size(760, 480)
         self.scene = None
         self.buffer = gl.GLuint()
@@ -227,6 +300,7 @@ class MapViewer(pyglet.window.Window):
             image = pyglet.image.ImageData(1, 1, 'RGBA', bytes(rgba))
             self.constants[name] = image.get_texture()
         gl.glClearColor(.055, .07, .09, 1)
+        self._map_framebuffer = _MapFramebuffer()
         pyglet.clock.schedule(self.update)
         initial = Path(path) if path else (self.map_paths[0] if self.map_paths else None)
         if initial:
@@ -569,7 +643,7 @@ class MapViewer(pyglet.window.Window):
             self._depth_write = depth_write
         self._capability(gl.GL_POLYGON_OFFSET_FILL, mat.depth_offset)
         if mat.depth_offset and not self._polygon_offset_set:
-            gl.glPolygonOffset(-1., -1.)
+            gl.glPolygonOffset(1., 1.)
             self._polygon_offset_set = True
         blend = bool(mat.blend) and self.mode == 0
         self._capability(gl.GL_BLEND, blend)
@@ -611,14 +685,23 @@ class MapViewer(pyglet.window.Window):
         self.occlusion_groups_tested = self.occlusion_groups_hidden = self.occlusion_results_ready = 0
         if self.scene:
             fw, fh = self.get_framebuffer_size()
+            if fw <= 0 or fh <= 0:
+                return
             scale = fh/max(self.height, 1)
             width, height = self.width, max(1, self.height-180)
-            gl.glViewport(0, round(80*scale), fw, max(1, round(height*scale)))
+            map_height = max(1, round(height*scale))
+            self._map_framebuffer.bind(fw, map_height)
+            gl.glViewport(0, 0, fw, map_height)
+            gl.glClipControl(gl.GL_LOWER_LEFT, gl.GL_ZERO_TO_ONE)
+            gl.glEnable(gl.GL_MULTISAMPLE)
+            gl.glClearDepth(0.)
+            gl.glDepthFunc(gl.GL_GREATER)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
             eye, view = self._camera()
             near, far = _map_clip_planes(eye, _camera_forward(self.yaw, self.pitch),
                                          self.scene.bounds_min, self.scene.bounds_max,
                                          draw_distance=self.draw_distance)
-            projection = Mat4.perspective_projection(width/height, near, far, fov=50)
+            projection = _map_projection(width/height, near, far)
             mvp = projection @ view
             visible = visible_mesh_indices(self.scene.metadata, mvp)
             self.visible_mesh_count = len(visible)
@@ -669,6 +752,11 @@ class MapViewer(pyglet.window.Window):
                     self.occlusion_groups_hidden = sum(not passed for passed in results.values())
                 gl.glBindVertexArray(0)
                 gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
+            self._map_framebuffer.blit(round(80*scale))
+            gl.glDisable(gl.GL_MULTISAMPLE)
+            gl.glClipControl(gl.GL_LOWER_LEFT, gl.GL_NEGATIVE_ONE_TO_ONE)
+            gl.glClearDepth(1.)
+            gl.glDepthFunc(gl.GL_LESS)
             gl.glViewport(0, 0, fw, fh)
         # UI textures must use their own sampling parameters, not map samplers.
         gl.glBindSampler(0, 0)
@@ -836,6 +924,7 @@ class MapViewer(pyglet.window.Window):
         pyglet.clock.unschedule(self._load_pending)
         pyglet.clock.unschedule(self._capture)
         self._release_scene()
+        self._map_framebuffer.delete()
         for texture in self.constants.values():
             texture.delete()
         gl.glDeleteSamplers(2, self.samplers)

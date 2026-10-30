@@ -20,7 +20,7 @@ from pyglet.math import Mat4, Vec3
 from pyglet.window import key, mouse
 
 from ds2md_scene import load_scene
-from ds2md_animation import Animator
+from ds2md_animation import Animator, MatrixAnimation
 
 
 MESH_VERTEX = """#version 330 core
@@ -145,7 +145,7 @@ class FloatTexture:
         width = min(count, 1024, self.max_size)
         height = (count + width - 1) // width
         if height > self.max_size:
-            raise ValueError('Skeletal data exceeds the GPU texture-size limit.')
+            raise ValueError('Animation data exceeds the GPU texture-size limit.')
         pointer = (gl.GLfloat * len(values)).from_buffer(values)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
         if (width, height) != (self.width, self.height):
@@ -173,10 +173,10 @@ class FloatTexture:
 
 
 class AnimatedBounds:
-    """Conservative skin bounds; the per-pose work depends only on bone count."""
+    """Conservative palette bounds; per-pose work depends only on matrix count."""
 
-    def __init__(self, scene, bone_count):
-        self.bones = [None] * bone_count
+    def __init__(self, scene, matrix_count):
+        self.bones = [None] * matrix_count
         self.unweighted = None
         self.weight_min = math.inf
         self.weight_max = 0.0
@@ -184,7 +184,7 @@ class AnimatedBounds:
             for vertex in range(len(mesh.positions) // 3):
                 point = mesh.positions[vertex * 3:vertex * 3 + 3]
                 start, count = mesh.influence_ranges[vertex * 2:vertex * 2 + 2]
-                if not bone_count or not count:
+                if not matrix_count or not count:
                     self.unweighted = self._include(self.unweighted, point)
                     continue
                 total = 0.0
@@ -384,7 +384,7 @@ class ModelViewer(pyglet.window.Window):
                                                 width=1100, batch=self.ui_batch)
         self.status_label = pyglet.text.Label('Open or drop a DS2MD model to begin.', font_size=9,
                                              x=14, y=12, batch=self.ui_batch)
-        self.clip_label = pyglet.text.Label('Bind pose (no animation)', font_size=10,
+        self.clip_label = pyglet.text.Label('Static model / no animation', font_size=10,
                                            x=14, y=153, batch=self.ui_batch)
         self.time_label = pyglet.text.Label('0.00 / 0.00 s', font_size=9,
                                            anchor_x='right', y=88, batch=self.ui_batch)
@@ -443,11 +443,13 @@ class ModelViewer(pyglet.window.Window):
         self.invalid = True
 
     def _update_controls(self):
+        geometry_action = ('stored geometry' if self.scene is not None
+                           and self.scene.version in ('0.5', '0.6') else 'bind')
         self.controls_label.text = (
             'LMB orbit | Shift+LMB light | RMB/MMB pan | Wheel zoom | Ctrl+O open\n'
             f'F frame | L light | W wire: {"on" if self.wireframe else "off"} | '
             f'G grid: {"on" if self.show_grid else "off"} | Space play | Arrows seek | Home start\n'
-            '[ / ] clips | B bind | - / + speed | R repeat')
+            f'[ / ] clips | B {geometry_action} | - / + speed | R repeat')
         self.invalid = True
 
     def _status(self, text, error=False):
@@ -473,12 +475,16 @@ class ModelViewer(pyglet.window.Window):
 
     def _update_animation_ui(self):
         animator = self.animator
+        sampled = (isinstance(animator.animation, MatrixAnimation) if animator is not None
+                   else self.scene is not None and self.scene.version in ('0.5', '0.6'))
+        stored_label = 'Stored geometry' if sampled else 'Bind pose'
         if animator is not None and animator.clip_index is not None:
-            clip = animator.skeleton.clips[animator.clip_index]
-            name = f'{animator.clip_index + 1}/{len(animator.skeleton.clips)}  {clip.name}'
+            clip = animator.animation.clips[animator.clip_index]
+            name = f'{animator.clip_index + 1}/{len(animator.animation.clips)}  {clip.name}'
         else:
-            name = 'Bind pose' if animator is not None else 'Static model / no animation'
+            name = stored_label if animator is not None else 'Static model / no animation'
         self._set_label(self.clip_label, name, self.width - 28)
+        self.animation_buttons['bind'][1].text = 'Stored' if sampled else 'Bind'
         time = animator.time_seconds if animator is not None else 0.0
         duration = animator.duration_seconds if animator is not None else 0.0
         fraction = min(1.0, max(0.0, time / duration)) if duration else 0.0
@@ -512,7 +518,7 @@ class ModelViewer(pyglet.window.Window):
         self.invalid = True
 
     def update_animation(self, dt):
-        """Clock callback; evaluate bones and upload only when animation advances."""
+        """Clock callback; evaluate the palette only when animation advances."""
         was_playing = bool(self.animator and self.animator.playing)
         if self.animator is not None and self.animator.update(dt):
             self._pose_changed()
@@ -522,7 +528,7 @@ class ModelViewer(pyglet.window.Window):
             self.invalid = True
 
     def select_clip(self, index):
-        """Select a clip index, or None for bind pose; frame only on selection."""
+        """Select a clip or stored geometry (None); frame only on selection."""
         if self.animator is None:
             return
         try:
@@ -537,7 +543,7 @@ class ModelViewer(pyglet.window.Window):
     def cycle_clip(self, direction):
         if self.animator is None:
             return
-        count = len(self.animator.skeleton.clips)
+        count = len(self.animator.animation.clips)
         current = self.animator.clip_index
         selection = ((0 if current is None else current + 1) + direction) % (count + 1)
         self.select_clip(None if selection == 0 else selection - 1)
@@ -546,7 +552,7 @@ class ModelViewer(pyglet.window.Window):
         if self.animator is None:
             return
         if self.animator.clip_index is None:
-            if self.animator.skeleton.clips:
+            if self.animator.animation.clips:
                 self.select_clip(0)
             return
         if not self.animator.playing and self.animator.time_seconds >= self.animator.duration_seconds:
@@ -598,15 +604,15 @@ class ModelViewer(pyglet.window.Window):
         buffers = []
         try:
             scene = load_scene(path)
-            animator = Animator(scene.skeleton) if scene.skeleton is not None else None
-            if animator is not None and scene.skeleton.clips:
+            animator = Animator(scene.animation) if scene.animation is not None else None
+            if animator is not None and scene.animation.clips:
                 animator.select_clip(0)
             identity = array('f', (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1))
             palette = FloatTexture(animator.matrices if animator and animator.matrices else identity,
                                    gl.GL_RGBA32F)
             buffers.append(palette)
-            bone_count = len(scene.skeleton.bones) if scene.skeleton is not None else 0
-            bounds_cache = AnimatedBounds(scene, bone_count)
+            matrix_count = scene.animation.matrix_count if scene.animation is not None else 0
+            bounds_cache = AnimatedBounds(scene, matrix_count)
             low, high = bounds_cache.evaluate(animator.matrices if animator else ())
             meshes = []
             warnings = list(scene.texture_warnings)
@@ -624,7 +630,7 @@ class ModelViewer(pyglet.window.Window):
                     texture = textures[mesh.albedo_path]
                 influence_buffer = FloatTexture(mesh.influences or (0.0, 0.0), gl.GL_RG32F)
                 buffers.append(influence_buffer)
-                ranges = mesh.influence_ranges if bone_count else (0, 0) * (len(mesh.positions) // 3)
+                ranges = mesh.influence_ranges if matrix_count else (0, 0) * (len(mesh.positions) // 3)
                 vertex_list = self.mesh_program.vertex_list_indexed(
                     len(mesh.positions) // 3, gl.GL_TRIANGLES, mesh.indices,
                     position=('f', mesh.positions), normal=('f', mesh.normals),
@@ -680,11 +686,16 @@ class ModelViewer(pyglet.window.Window):
         triangles = sum(len(mesh.indices) // 3 for mesh in scene.meshes)
         textured_meshes = sum(texture is not None for _, texture, _, _ in meshes)
         texture_count = sum(texture is not None for texture in textures.values())
-        clips = len(scene.skeleton.clips) if scene.skeleton is not None else 0
+        clips = len(scene.animation.clips) if scene.animation is not None else 0
+        if isinstance(scene.animation, MatrixAnimation) or scene.version in ('0.5', '0.6'):
+            palette_stats = f'{matrix_count} sampled tracks'
+        else:
+            bone_count = len(scene.animation.bones) if scene.animation is not None else 0
+            palette_stats = f'{bone_count} bones'
         self.stats_label.text = (f'DS2MD {scene.version} | {len(scene.meshes):,} meshes | '
                                  f'{vertices:,} vertices | {triangles:,} triangles\n'
                                  f'Albedo {textured_meshes}/{len(meshes)} meshes / '
-                                 f'{texture_count} textures | {bone_count} bones | {clips} clips')
+                                 f'{texture_count} textures | {palette_stats} | {clips} clips')
         self._set_label(self.note_label, scene.note, self.width - 28)
         self.empty_label.text = ''
         if warnings:

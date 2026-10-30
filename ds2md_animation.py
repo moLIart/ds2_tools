@@ -1,9 +1,9 @@
-"""DS2MD skeletal playback without a rendering dependency.
+"""DS2MD skeletal and sampled-matrix playback without a rendering dependency.
 
-CPU matrices are row-major and act on column vectors: global = parent * local,
-skin = animated_global * inverse_bind. Disk matrices are transposed on load;
-Animator.matrices contains the same skin transforms in OpenGL column-major f32.
-Keys are decoded only for the selected clip, not for the complete model corpus.
+Skeletal CPU matrices are row-major column-vector transforms: global = parent
+* local, skin = animated_global * inverse_bind. Legacy sampled matrices retain
+disk row-vector order, with pre_matrix * sample uploaded directly column-major.
+Animator.matrices is the shared OpenGL f32 palette for both animation formats.
 """
 
 from array import array
@@ -57,6 +57,37 @@ class Skeleton:
     _data: bytes = field(repr=False)
     _order: tuple[int, ...] = field(repr=False)
     _inverse_bind: tuple[tuple[float, ...], ...] = field(repr=False)
+
+    @property
+    def matrix_count(self):
+        return len(self.bones)
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixTrack:
+    sample_rate: float
+    pre_matrix: tuple[float, ...]
+    samples: tuple[float, ...] = field(repr=False)
+
+    @property
+    def sample_count(self):
+        return len(self.samples) // 16
+
+
+@dataclass(frozen=True, slots=True)
+class SampledClip:
+    name: str
+    duration_seconds: float
+    tracks: tuple[MatrixTrack, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixAnimation:
+    clips: tuple[SampledClip, ...]
+
+    @property
+    def matrix_count(self):
+        return len(self.clips[0].tracks)
 
 
 def _finite(value, label):
@@ -168,6 +199,42 @@ def load_skeleton(metadata: dict, data: bytes) -> Skeleton | None:
     return Skeleton(tuple(bones), tuple(clips), data, tuple(order), tuple(inverse_bind))
 
 
+def load_matrix_animation(metadata: dict) -> MatrixAnimation | None:
+    """Keep legacy matrix tracks separate from named skeletal hierarchies.
+
+    Legacy rate parameters are interpreted as samples per second. Display only
+    stored poses: interpolating arbitrary matrices would invent deformations.
+    """
+    tracks = []
+    duration = 0.0
+    for mesh in metadata['meshes']:
+        sources = mesh.get('matrix_tracks', ())
+        if not sources:
+            continue
+        label = f'Mesh {mesh["name"]}'
+        rate = _finite(mesh['sample_rate'], f'{label} sample rate')
+        if rate <= 0.0:
+            raise ValueError(f'{label} sample rate must be positive')
+        count = mesh['sample_count']
+        if not isinstance(count, int) or count <= 0:
+            raise ValueError(f'{label} sampled animation must contain frames')
+        for index, source in enumerate(sources):
+            pre = tuple(source['pre_matrix'])
+            samples = tuple(source['samples'])
+            if len(pre) != 16 or len(samples) != count * 16:
+                raise ValueError(f'{label}, track {index}: inconsistent matrix count')
+            if not all(math.isfinite(v) and abs(v) <= _F32_MAX
+                       for values in (pre, samples) for v in values):
+                raise ValueError(f'{label}, track {index}: invalid matrix values')
+            tracks.append(MatrixTrack(rate, pre, samples))
+        duration = max(duration, (count - 1) / rate)
+    if not tracks:
+        return None
+    if not math.isfinite(duration):
+        raise ValueError('Sampled animation duration must be finite')
+    return MatrixAnimation((SampledClip('Sampled animation', duration, tuple(tracks)),))
+
+
 @dataclass(slots=True)
 class _DecodedChannel:
     bone_index: int
@@ -273,6 +340,22 @@ def _sample(channel, time):
     return _trs(q, translation, scale)
 
 
+def _evaluate_sampled(clip, time):
+    palette = array('f')
+    for index, track in enumerate(clip.tracks):
+        # nextafter preserves exact sample selections despite a one-ulp product
+        # roundoff when seeking to frame / rate.
+        frame = (track.sample_count - 1
+                 if time >= (track.sample_count - 1) / track.sample_rate else
+                 int(math.nextafter(time * track.sample_rate, math.inf)))
+        offset = frame * 16
+        matrix = _multiply(track.pre_matrix, track.samples[offset:offset + 16])
+        if not all(math.isfinite(v) and abs(v) <= _F32_MAX for v in matrix):
+            raise ValueError(f'Sampled track {index} matrix is not representable as f32')
+        palette.extend(matrix)
+    return palette
+
+
 class Animator:
     """A bind-pose-first player; seeking never wraps, even at the exact endpoint.
 
@@ -281,23 +364,25 @@ class Animator:
     support reverse playback. The public f32 palette array keeps its identity.
     """
 
-    def __init__(self, skeleton: Skeleton):
-        self.skeleton = skeleton
+    def __init__(self, animation: Skeleton | MatrixAnimation):
+        self.animation = animation
         self.clip_index = None
         self.time_seconds = 0.0
         self.playing = False
         self.loop = True
         self.speed = 1.0
-        self.matrices = array('f', _IDENTITY) * len(skeleton.bones)
+        self.matrices = array('f', _IDENTITY) * animation.matrix_count
         self._channels = ()
 
     @property
     def duration_seconds(self):
         return (0.0 if self.clip_index is None else
-                self.skeleton.clips[self.clip_index].duration_seconds)
+                self.animation.clips[self.clip_index].duration_seconds)
 
     def _evaluate(self, channels, time):
-        skeleton = self.skeleton
+        if isinstance(self.animation, MatrixAnimation):
+            return _evaluate_sampled(channels, time)
+        skeleton = self.animation
         local = [bone.local_rest_matrix for bone in skeleton.bones]
         for channel in channels:
             local[channel.bone_index] = _sample(channel, time)
@@ -319,15 +404,16 @@ class Animator:
 
     def select_clip(self, index: int | None):
         if index is None:
-            self.matrices[:] = array('f', _IDENTITY) * len(self.skeleton.bones)
+            self.matrices[:] = array('f', _IDENTITY) * self.animation.matrix_count
             self._channels = ()
             self.clip_index = None
             self.time_seconds = 0.0
             self.playing = False
             return
-        if not isinstance(index, int) or not 0 <= index < len(self.skeleton.clips):
+        if not isinstance(index, int) or not 0 <= index < len(self.animation.clips):
             raise ValueError(f'Invalid animation clip index {index!r}')
-        channels = _decode(self.skeleton, self.skeleton.clips[index])
+        clip = self.animation.clips[index]
+        channels = clip if isinstance(self.animation, MatrixAnimation) else _decode(self.animation, clip)
         palette = self._evaluate(channels, 0.0)
         self.matrices[:] = palette
         self._channels = channels

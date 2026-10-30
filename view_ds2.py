@@ -25,8 +25,6 @@ from pyglet.math import Mat4, Vec3
 from pyglet.window import FPSDisplay, key, mouse
 
 from ds2_scene import TextureIndex, load_map_scene, read_materials, visible_mesh_indices
-from ds2_occlusion import build_occlusion_groups, group_query_safe
-from ds2_occlusion_gl import OcclusionQueries
 from view_ds2md import choose_file, load_albedo_texture
 
 
@@ -212,7 +210,7 @@ class _MapFramebuffer:
 
 
 class MapViewer(pyglet.window.Window):
-    def __init__(self, path=None, *, mode=0, screenshot=None, occlusion=False):
+    def __init__(self, path=None, *, mode=0, screenshot=None):
         config = gl.Config(double_buffer=True, depth_size=0, sample_buffers=0, samples=0,
                            major_version=3, minor_version=3)
         self._camera_buttons = 0
@@ -226,11 +224,6 @@ class MapViewer(pyglet.window.Window):
         self.scene = None
         self.buffer = gl.GLuint()
         self.geometry_bindings = {}
-        self.occlusion_groups = ()
-        self.mesh_groups = ()
-        self.occlusion_queries = None
-        self.occlusion_enabled = occlusion
-        self.occlusion_groups_tested = self.occlusion_groups_hidden = self.occlusion_results_ready = 0
         self.program = ShaderProgram(Shader(VERTEX, 'vertex'), Shader(FRAGMENT, 'fragment'))
         self.locations = {name: gl.glGetUniformLocation(self.program.id, name.encode()) for name in (
             'model', 'flip_albedo', 'flip_lightmap', 'use_lightmap', 'use_colors',
@@ -269,7 +262,7 @@ class MapViewer(pyglet.window.Window):
                                         batch=self.ui, color=(190, 200, 214, 255))
         self.controls = pyglet.text.Label(
             'LMB orbit | MMB pan | Wheel zoom/speed | RMB fly-look | F fly/orbit | WASD, Q/E move | Shift fast\n'
-            '1 combined | 2 albedo | 3 lightmap | 4 vertex colors | 5 mesh colors | G wireframe | O occlusion | Home fit | [ / ] maps | Ctrl+O open',
+            '1 combined | 2 albedo | 3 lightmap | 4 vertex colors | 5 mesh colors | G wireframe | Home fit | [ / ] maps | Ctrl+O open',
             x=16, y=64, font_size=9, multiline=True, width=1240, batch=self.ui)
         self.distance_label = pyglet.text.Label('', x=16, y=32, font_size=9, batch=self.ui)
         self.buttons = []
@@ -353,7 +346,6 @@ class MapViewer(pyglet.window.Window):
         loaded, warnings = {}, []
         new_buffer = gl.GLuint()
         new_bindings = {}
-        new_queries = None
         try:
             scene = load_map_scene(path, self.texture_index, self.materials)
             warnings.extend(scene.warnings)
@@ -394,16 +386,8 @@ class MapViewer(pyglet.window.Window):
                          matrix, mesh_index, binding, _mesh_color(mesh_index))
                 (transparent if material.blend else opaque).append(entry)
             gl.glBindVertexArray(0)
-            groups = build_occlusion_groups(scene.metadata['meshes'])
-            mesh_groups = [0] * len(scene.metadata['meshes'])
-            for group_index, group in enumerate(groups):
-                for mesh_index in group.mesh_indices:
-                    mesh_groups[mesh_index] = group_index
-            new_queries = OcclusionQueries(groups)
         except (Exception, ShaderException) as error:
             gl.glBindVertexArray(0)
-            if new_queries is not None:
-                new_queries.delete()
             for binding in new_bindings.values():
                 gl.glDeleteVertexArrays(1, ctypes.byref(binding.vao))
             if new_buffer.value:
@@ -421,9 +405,6 @@ class MapViewer(pyglet.window.Window):
         self.scene, self.buffer, self.textures = scene, new_buffer, loaded
         self.gpu_buffers = gpu_buffers
         self.geometry_bindings = new_bindings
-        self.occlusion_groups = groups
-        self.mesh_groups = tuple(mesh_groups)
-        self.occlusion_queries = new_queries
         self.load_error = False
         self.opaque, self.transparent = opaque, transparent
         self.frame_map()
@@ -441,10 +422,6 @@ class MapViewer(pyglet.window.Window):
             pyglet.clock.schedule_once(self._capture, .25)
 
     def _release_scene(self):
-        if self.occlusion_queries is not None:
-            self.occlusion_queries.delete()
-            self.occlusion_queries = None
-        self.occlusion_groups = self.mesh_groups = ()
         for binding in self.geometry_bindings.values():
             gl.glDeleteVertexArrays(1, ctypes.byref(binding.vao))
         self.geometry_bindings.clear()
@@ -600,7 +577,7 @@ class MapViewer(pyglet.window.Window):
             (gl.glEnable if enabled else gl.glDisable)(capability)
             self._enabled[capability] = enabled
 
-    def _draw_mesh(self, entry, query=None):
+    def _draw_mesh(self, entry):
         mesh, mat, albedo, lightmap, flip_a, flip_l, matrix, _, binding, mesh_color = entry
         buffers = self.gpu_buffers
         if binding is not self._bound_geometry:
@@ -652,37 +629,17 @@ class MapViewer(pyglet.window.Window):
             if self._blend_function != factors:
                 gl.glBlendFunc(*factors)
                 self._blend_function = factors
-        # Generic attribute values and all material state must be set OUTSIDE
-        # conditional rendering: glVertexAttrib results are undefined if hidden.
-        if query is not None:
-            gl.glBeginConditionalRender(query, gl.GL_QUERY_NO_WAIT)
-        try:
-            for prefix, primitive in [('', gl.GL_TRIANGLES), ('strip_', gl.GL_TRIANGLE_STRIP)]:
-                count = mesh[prefix+'index_count']
-                if count:
-                    ib = buffers[mesh[prefix+'index_buffer']]
-                    pointer = ctypes.c_void_p(ib['indices_offset'] + mesh[prefix+'index_start']*4)
-                    gl.glDrawElements(primitive, count, gl.GL_UNSIGNED_INT, pointer)
-        finally:
-            if query is not None:
-                gl.glEndConditionalRender()
+        for prefix, primitive in [('', gl.GL_TRIANGLES), ('strip_', gl.GL_TRIANGLE_STRIP)]:
+            count = mesh[prefix+'index_count']
+            if count:
+                ib = buffers[mesh[prefix+'index_buffer']]
+                pointer = ctypes.c_void_p(ib['indices_offset'] + mesh[prefix+'index_start']*4)
+                gl.glDrawElements(primitive, count, gl.GL_UNSIGNED_INT, pointer)
 
-    def _draw_entries(self, entries, queried):
-        if not queried:
-            for entry in entries:
-                self._draw_mesh(entry)
-            return
-        for entry in entries:
-            material = entry[1]
-            query = None
-            if (material.depth_test or self.mode == 4) and not material.depth_offset:
-                query = queried.get(self.mesh_groups[entry[7]])
-            self._draw_mesh(entry, query)
 
     def on_draw(self):
         gl.glDepthMask(gl.GL_TRUE)
         self.clear()
-        self.occlusion_groups_tested = self.occlusion_groups_hidden = self.occlusion_results_ready = 0
         if self.scene:
             fw, fh = self.get_framebuffer_size()
             if fw <= 0 or fh <= 0:
@@ -721,35 +678,8 @@ class MapViewer(pyglet.window.Window):
                     return entry[1].sort, -_mesh_distance_squared(entry[0], eye)
                 transparent = sorted((entry for entry in self.transparent if entry[7] in visible),
                                      key=transparent_order)
-                queried = {}
-                remaining = opaque
-                if self.occlusion_enabled and not self.wireframe and self.occlusion_queries is not None:
-                    # Preserve exact material priorities and front-to-back order.
-                    # Only real already-rendered geometry supplies occluder depth.
-                    seed_count = min(len(opaque), max(64, len(opaque)//8))
-                    self._draw_entries(opaque[:seed_count], {})
-                    remaining = opaque[seed_count:]
-                    candidates = {
-                        self.mesh_groups[entry[7]] for entry in chain(remaining, transparent)
-                        if (entry[1].depth_test or self.mode == 4) and not entry[1].depth_offset
-                    }
-                    forward = _camera_forward(self.yaw, self.pitch)
-                    queried = {
-                        index: self.occlusion_queries.queries[index]
-                        for index in sorted(candidates)
-                        if group_query_safe(self.occlusion_groups[index], eye, forward, near)
-                    }
-                    if queried:
-                        self.occlusion_queries.issue(queried, mvp)
-                        self.program.use()
-                        self._reset_render_state()
-                self._draw_entries(remaining, queried)
-                self._draw_entries(transparent, queried)
-                if queried:
-                    results = self.occlusion_queries.results(queried)
-                    self.occlusion_groups_tested = len(queried)
-                    self.occlusion_results_ready = len(results)
-                    self.occlusion_groups_hidden = sum(not passed for passed in results.values())
+                for entry in chain(opaque, transparent):
+                    self._draw_mesh(entry)
                 gl.glBindVertexArray(0)
                 gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
             self._map_framebuffer.blit(round(80*scale))
@@ -774,13 +704,6 @@ class MapViewer(pyglet.window.Window):
         distance = 'Auto' if self.draw_distance is None else f'{self.draw_distance:,.1f}'
         self.distance_label.text = (f'Draw distance: {distance} | '
                                     'PgUp/PgDn increase/decrease | End auto')
-        if self.occlusion_enabled:
-            occlusion = ('wireframe bypass' if self.wireframe else
-                         f'{self.occlusion_groups_tested} queries, '
-                         f'{self.occlusion_groups_hidden}/{self.occlusion_results_ready} hidden/ready')
-        else:
-            occlusion = 'off'
-        self.distance_label.text += f' | O: OCC {occlusion}'
         self.ui.draw()
         self.fps_display.draw()
         self.invalid = False
@@ -867,8 +790,6 @@ class MapViewer(pyglet.window.Window):
     def on_key_press(self, symbol, modifiers):
         if symbol == key.O and modifiers & key.MOD_CTRL:
             self.open_file()
-        elif symbol == key.O:
-            self.occlusion_enabled = not self.occlusion_enabled
         elif symbol in (key._1, key._2, key._3, key._4, key._5):
             self.mode = (key._1, key._2, key._3, key._4, key._5).index(symbol)
         elif symbol == key.HOME:
@@ -938,12 +859,10 @@ def main():
     parser.add_argument('map', nargs='?', type=Path)
     parser.add_argument('--mode', choices=('combined', 'albedo', 'lightmap', 'colors', 'meshes'), default='combined')
     parser.add_argument('--screenshot', type=Path, help='Save a rendered frame and exit')
-    parser.add_argument('--occlusion', action='store_true',
-                        help='Enable grouped GPU occlusion queries (O toggles)')
     args = parser.parse_args()
     try:
         viewer = MapViewer(args.map, mode=('combined', 'albedo', 'lightmap', 'colors', 'meshes').index(args.mode),
-                           screenshot=args.screenshot, occlusion=args.occlusion)
+                           screenshot=args.screenshot)
         pyglet.app.run(interval=0)
     except Exception as error:
         print(f'DS2 viewer: {error}', file=sys.stderr)

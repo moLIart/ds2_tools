@@ -22,6 +22,7 @@ RUNTIME_FILES = (
     'ds2md_scene.py',
     'ds2md_animation.py',
     'inspect_ds2md.py',
+    'ds2md_legacy.py',
     'requirements-viewer.txt',
 )
 ARCHIVE_DIRECTORY = 'ds2md_viewer/ds2_research'

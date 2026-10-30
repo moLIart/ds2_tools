@@ -1,9 +1,9 @@
-"""Inspect packed DS2MD 0.9/1.0 model boundaries; no third-party dependencies.
+"""Inspect DS2MD text 0.5 and binary 0.6/0.9/1.0; no third-party dependencies.
 
 Usage: python ds2_research/inspect_ds2md.py FILE_OR_DIRECTORY
 A file emits decoded metadata and byte offsets as JSON. A directory recursively
-checks .ds2md files, reporting older versions separately; failures exit with 1.
-Geometry/key arrays stay in the original file; their offsets/counts are emitted.
+checks .ds2md files; failures exit with 1. DSMO packed/cache is not supported.
+The report omits decoded geometry and sampled matrix arrays.
 Strings are displayed as CP1251; the file itself contains untagged byte strings.
 
 Evidence: ds2render.dll SHA256
@@ -17,6 +17,11 @@ The second animation float is time-valued, but its purpose is unconfirmed.
 from pathlib import Path
 import struct
 from collections import Counter
+
+if __package__:
+    from .ds2md_legacy import parse_binary_model, parse_text_model
+else:
+    from ds2md_legacy import parse_binary_model, parse_text_model
 
 class UnsupportedVersion(ValueError):
     pass
@@ -47,12 +52,16 @@ class Reader:
 
 def parse_model(path):
     r = Reader(path)
-    if r.data.startswith(b'"DS2ModelFile_1"'):
-        raise UnsupportedVersion('ASCII 0.5')
+    if r.data.startswith(b'DSMO'):
+        raise UnsupportedVersion('DSMO packed/cache')
+    if r.data.lstrip(b' \t\r\n\v\f').startswith(b'"'):
+        return parse_text_model(r.data, Path(path).stem)
     signature = r.string()
     if signature != 'DS2ModelFile_1':
         raise ValueError('Invalid DS2ModelFile_1 signature')
     version = r.string()
+    if version == '0.6':
+        return parse_binary_model(r, Path(path).stem)
     if version not in ('0.9', '1.0'):
         raise UnsupportedVersion(version)
     out = {'version': version, 'name': r.string(), 'meshes': []}
@@ -126,6 +135,22 @@ def parse_model(path):
     return out
 
 
+def _metadata_report(model):
+    """Do not expand legacy geometry or sampled palettes into CLI JSON."""
+    result = dict(model)
+    result['meshes'] = []
+    decoded = {'positions', 'normals', 'uv_coords', 'indices',
+               'matrix_tracks', 'vertex_influences'}
+    for source in model['meshes']:
+        mesh = {key: value for key, value in source.items() if key not in decoded}
+        if 'matrix_tracks' in source:
+            mesh['matrix_track_count'] = len(source['matrix_tracks'])
+            mesh['influence_counts'] = dict(Counter(
+                len(influences) for influences in source['vertex_influences']))
+        result['meshes'].append(mesh)
+    return result
+
+
 def main():
     import argparse
     import json
@@ -137,7 +162,7 @@ def main():
             result = parse_model(args.path)
         except (ValueError, OSError) as error:
             parser.exit(1, f'{args.path}: {error}\n')
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(_metadata_report(result), ensure_ascii=False, indent=2))
         return 0
     report = {'parsed_versions': Counter(), 'unsupported_versions': Counter(),
               'mesh_count': 0, 'animation_count': 0, 'event_count': 0, 'failures': []}
@@ -154,6 +179,8 @@ def main():
         report['mesh_count'] += len(model['meshes'])
         animations = model.get('skeleton', {}).get('animations', [])
         report['animation_count'] += len(animations)
+        report['animation_count'] += int(any(
+            mesh.get('matrix_tracks') for mesh in model['meshes']))
         report['event_count'] += sum(len(a['events']) for a in animations)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return int(bool(report['failures']))

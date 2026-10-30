@@ -1,9 +1,8 @@
-"""Geometry, skeletal data and local albedo references from binary DS2MD files.
+"""Stored geometry, animation data and local albedo references from DS2MD files.
 
-Vertex arrays remain in their stored bind space. The renderer applies the
-animated global bone matrix times inverse global bind, as established by
-ds2render.dll:0x100CD657 and 0x100D7C00 (preferred base 0x10000000).
-Bounds here describe the stored vertices; the viewer evaluates animated bounds.
+Modern vertices use a skeletal matrix palette; legacy vertices use their stored
+sampled matrix tracks. Bounds here describe the stored vertices; the viewer
+evaluates bounds from the active palette.
 """
 
 from dataclasses import dataclass
@@ -13,10 +12,10 @@ import struct
 
 if __package__:
     from .inspect_ds2md import UnsupportedVersion, parse_model
-    from .ds2md_animation import Skeleton, load_skeleton
+    from .ds2md_animation import MatrixAnimation, Skeleton, load_matrix_animation, load_skeleton
 else:
     from inspect_ds2md import UnsupportedVersion, parse_model
-    from ds2md_animation import Skeleton, load_skeleton
+    from ds2md_animation import MatrixAnimation, Skeleton, load_matrix_animation, load_skeleton
 
 
 # A viewer safety policy, not a restriction claimed for the DS2MD format.
@@ -47,7 +46,7 @@ class Scene:
     bounds_max: tuple[float, float, float]
     note: str
     texture_warnings: tuple[str, ...]
-    skeleton: Skeleton | None
+    animation: Skeleton | MatrixAnimation | None
 
 
 def _strip_triangles(
@@ -111,8 +110,8 @@ def _resolve_albedo(
 def load_scene(path: Path | str) -> Scene:
     """Load stored geometry and local albedo references; raise ValueError/OSError.
 
-    The existing metadata parser remains the sole authority for layout/version
-    decoding. Array offsets refer to the original bytes, including for strips.
+    The metadata parser remains the sole authority for layout/version decoding.
+    Modern array offsets refer to the original bytes; legacy arrays are decoded.
     Triangle lists preserve their original index order and triangle membership.
     """
     path = Path(path)
@@ -121,29 +120,41 @@ def load_scene(path: Path | str) -> Scene:
     except UnsupportedVersion as error:
         raise ValueError(
             f"Unsupported DS2MD version {error}. "
-            "This viewer supports standard binary 0.9 and 1.0 only."
+            "This viewer supports text 0.5 and standard binary 0.6, 0.9 and 1.0."
         ) from error
     data = path.read_bytes()
     if len(data) != metadata['file_size']:
         raise ValueError("The model changed while it was being opened; open it again.")
 
-    skeleton = load_skeleton(metadata, data)
-    bone_count = len(skeleton.bones) if skeleton is not None else 0
+    legacy = metadata['version'] in ('0.5', '0.6')
+    animation = load_matrix_animation(metadata) if legacy else load_skeleton(metadata, data)
+    matrix_count = animation.matrix_count if animation is not None else 0
     meshes = []
     images = _texture_index()
     texture_warnings = []
     lower = [float('inf')] * 3
     upper = [float('-inf')] * 3
     triangle_count = 0
+    track_base = 0
     for number, source in enumerate(metadata['meshes'], 1):
         name = f"{number:02d}: {source['material'] or '(unnamed material)'}"
         count = source['vertex_count']
-        positions = struct.unpack_from(f'<{count * 3}f', data, source['positions_offset'])
-        normals = struct.unpack_from(f'<{count * 3}f', data, source['normals_offset'])
-        uv_coords = struct.unpack_from(f'<{count * 2}f', data, source['uv_offset'])
-        indices = struct.unpack_from(
-            f"<{source['index_count']}H", data, source['indices_offset']
-        )
+        if 'positions' in source:
+            positions = source['positions']
+            normals = source['normals']
+            uv_coords = source['uv_coords']
+            indices = source['indices']
+            if (len(positions) != count * 3 or len(normals) != count * 3
+                    or len(uv_coords) != count * 2
+                    or len(indices) != source['index_count']):
+                raise ValueError(f"Mesh {name} has inconsistent decoded geometry.")
+        else:
+            positions = struct.unpack_from(f'<{count * 3}f', data, source['positions_offset'])
+            normals = struct.unpack_from(f'<{count * 3}f', data, source['normals_offset'])
+            uv_coords = struct.unpack_from(f'<{count * 2}f', data, source['uv_offset'])
+            indices = struct.unpack_from(
+                f"<{source['index_count']}H", data, source['indices_offset']
+            )
         if any(not isfinite(value) for value in positions):
             raise ValueError(f"Mesh {name} contains non-finite vertex positions.")
         if any(abs(value) > _MAX_COORDINATE for value in positions):
@@ -155,28 +166,56 @@ def load_scene(path: Path | str) -> Scene:
             raise ValueError(f"Mesh {name} contains non-finite vertex normals.")
         ranges = []
         influences = []
-        assignment_offset = source['assignments_offset']
-        for _ in range(count):
+        if legacy:
+            mode = source['legacy_mode']
+            track_count = len(source['matrix_tracks'])
+            vertex_influences = source['vertex_influences']
+            if mode not in (1, 2, 3):
+                raise ValueError(f"Mesh {name} has an unsupported legacy animation mode.")
+            if mode == 1 and len(vertex_influences) != count:
+                raise ValueError(f"Mesh {name} has inconsistent influence data.")
+            if mode == 2 and track_count != 1:
+                raise ValueError(f"Mesh {name} has inconsistent rigid matrix data.")
+        else:
+            assignment_offset = source['assignments_offset']
+        for vertex in range(count):
             start = len(influences) // 2
-            influence_count = 0
-            if source['influence_mode']:
-                influence_count = data[assignment_offset]
-                assignment_offset += 1
-                if influence_count >= 10:
-                    raise ValueError(f"Mesh {name} has more than nine influences per vertex.")
-                for _ in range(influence_count):
-                    bone, weight = struct.unpack_from('<Hf', data, assignment_offset)
-                    assignment_offset += 6
-                    if bone >= bone_count:
-                        raise ValueError(f"Mesh {name} refers to missing bone {bone}.")
-                    if not isfinite(weight) or weight < 0.0:
-                        raise ValueError(f"Mesh {name} contains an invalid bone weight.")
-                    influences.extend((float(bone), weight))
-            ranges.extend((start, influence_count))
-        if assignment_offset != source['end']:
+            if legacy:
+                if mode == 1:
+                    entries = vertex_influences[vertex]
+                elif mode == 2:
+                    entries = ((0, 1.0),)
+                else:
+                    entries = ()
+            else:
+                entries = []
+                if source['influence_mode']:
+                    influence_count = data[assignment_offset]
+                    assignment_offset += 1
+                    if influence_count >= 10:
+                        raise ValueError(f"Mesh {name} has more than nine influences per vertex.")
+                    for _ in range(influence_count):
+                        entries.append(struct.unpack_from('<Hf', data, assignment_offset))
+                        assignment_offset += 6
+            if len(entries) >= 10:
+                raise ValueError(f"Mesh {name} has more than nine influences per vertex.")
+            for matrix, weight in entries:
+                if legacy:
+                    if matrix < 0 or matrix >= track_count:
+                        raise ValueError(f"Mesh {name} refers to a missing local matrix track.")
+                    matrix += track_base
+                if matrix < 0 or matrix >= matrix_count:
+                    raise ValueError(f"Mesh {name} refers to missing animation matrix {matrix}.")
+                if not isfinite(weight) or weight < 0.0:
+                    raise ValueError(f"Mesh {name} contains an invalid animation weight.")
+                influences.extend((float(matrix), weight))
+            ranges.extend((start, len(entries)))
+        if legacy:
+            track_base += track_count
+        elif assignment_offset != source['end']:
             raise ValueError(f"Mesh {name} has inconsistent influence data.")
         # Check against these bytes too: the metadata parser opens the path itself.
-        if indices and max(indices) >= count:
+        if indices and (min(indices) < 0 or max(indices) >= count):
             raise ValueError(f"Mesh {name} has an index outside its vertex array.")
         if source['triangle_strip']:
             indices = _strip_triangles(indices, positions)
@@ -199,9 +238,12 @@ def load_scene(path: Path | str) -> Scene:
 
     if not triangle_count:
         raise ValueError("The model contains no renderable triangles.")
-    note = "Bind-space geometry; camera fits the displayed pose."
-    if skeleton is not None:
-        note += f" {len(skeleton.bones)} bones; {len(skeleton.clips)} animation clips."
+    note = "Stored geometry; camera fits the displayed pose." if legacy else (
+        "Bind-space geometry; camera fits the displayed pose.")
+    if isinstance(animation, MatrixAnimation):
+        note += f" {animation.matrix_count} sampled matrix tracks; {len(animation.clips)} clips."
+    elif animation is not None:
+        note += f" {len(animation.bones)} bones; {len(animation.clips)} animation clips."
     return Scene(
         path=path,
         name=metadata['name'] or path.stem,
@@ -211,5 +253,5 @@ def load_scene(path: Path | str) -> Scene:
         bounds_max=tuple(upper),
         note=note,
         texture_warnings=tuple(texture_warnings),
-        skeleton=skeleton,
+        animation=animation,
     )

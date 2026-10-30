@@ -8,6 +8,7 @@ import ctypes
 import math
 from pathlib import Path
 import sys
+import warnings
 
 import pyglet
 
@@ -237,7 +238,7 @@ class AnimatedBounds:
 
 
 def load_albedo_texture(path: Path) -> pyglet.image.Texture:
-    """Decode and upload one repeating albedo; requires a current GL context."""
+    """Upload mipmapped, anisotropic DDS/TGA textures; requires a current GL context."""
     if path.suffix.casefold() == '.tga':
         # Windows WIC does not decode the game's TGA; use pyglet's Pillow codec.
         from pyglet.image.codecs.pil import PILImageDecoder
@@ -249,7 +250,7 @@ def load_albedo_texture(path: Path) -> pyglet.image.Texture:
     image = pyglet.image.load(str(path), decoder=decoder)
     texture = pyglet.image.Texture.create(
         image.width, image.height, internalformat=None,
-        min_filter=gl.GL_LINEAR, mag_filter=gl.GL_LINEAR)
+        min_filter=gl.GL_LINEAR_MIPMAP_LINEAR, mag_filter=gl.GL_LINEAR)
     try:
         texture.bind()
         gl.glTexParameteri(texture.target, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT)
@@ -260,8 +261,26 @@ def load_albedo_texture(path: Path) -> pyglet.image.Texture:
             gl.glCompressedTexImage2D(
                 texture.target, 0, image.gl_format, image.width, image.height,
                 0, len(image.data), image.data)
+            for level, data in enumerate(image.mipmap_data, 1):
+                gl.glCompressedTexImage2D(
+                    texture.target, level, image.gl_format,
+                    max(1, image.width >> level), max(1, image.height >> level),
+                    0, len(data), data)
+            # A DDS may contain a partial chain, or only its base level.
+            gl.glTexParameteri(texture.target, gl.GL_TEXTURE_MAX_LEVEL, len(image.mipmap_data))
         else:
             image.blit_to_texture(texture.target, 0, 0, 0, 0, internalformat=gl.GL_RGBA)
+            gl.glGenerateMipmap(texture.target)
+        if (gl.gl_info.have_version(4, 6)
+                or gl.gl_info.have_extension('GL_ARB_texture_filter_anisotropic')
+                or gl.gl_info.have_extension('GL_EXT_texture_filter_anisotropic')):
+            max_anisotropy = gl.GLfloat()
+            gl.glGetFloatv(gl.GL_MAX_TEXTURE_MAX_ANISOTROPY, ctypes.byref(max_anisotropy))
+            gl.glTexParameterf(texture.target, gl.GL_TEXTURE_MAX_ANISOTROPY, max_anisotropy.value)
+        else:
+            warnings.warn(
+                'Anisotropic filtering is unavailable in this OpenGL context; '
+                'using trilinear mip filtering.', RuntimeWarning)
     except Exception:
         texture.delete()
         raise
@@ -270,10 +289,11 @@ def load_albedo_texture(path: Path) -> pyglet.image.Texture:
     return texture
 
 
-def choose_file(owner, initial_directory: Path) -> Path | None:
+def choose_file(owner, initial_directory: Path, *, extension='ds2md',
+                description='DS2MD models', title='Open DS2MD model') -> Path | None:
     """Use the Windows common dialog without tkinter or changing the cwd."""
     if sys.platform != 'win32':
-        raise OSError('Native Open is Windows-only; use a CLI path or drop a model file.')
+        raise OSError('Native Open is Windows-only; use a CLI path or drop a file.')
     from ctypes import wintypes
 
     class OPENFILENAMEW(ctypes.Structure):
@@ -301,12 +321,12 @@ def choose_file(owner, initial_directory: Path) -> Path | None:
     options = OPENFILENAMEW()
     options.lStructSize = ctypes.sizeof(options)
     options.hwndOwner = owner
-    options.lpstrFilter = 'DS2MD models (*.ds2md)\0*.ds2md\0All files (*.*)\0*.*\0\0'
+    options.lpstrFilter = f'{description} (*.{extension})\0*.{extension}\0All files (*.*)\0*.*\0\0'
     options.nFilterIndex = 1
     options.lpstrFile = ctypes.cast(buffer, wintypes.LPWSTR)
     options.nMaxFile = len(buffer)
     options.lpstrInitialDir = str(initial_directory)
-    options.lpstrTitle = 'Open DS2MD model'
+    options.lpstrTitle = title
     # EXPLORER | FILEMUSTEXIST | PATHMUSTEXIST | NOCHANGEDIR
     options.Flags = 0x00080000 | 0x00001000 | 0x00000800 | 0x00000008
     if library.GetOpenFileNameW(ctypes.byref(options)):

@@ -148,7 +148,7 @@ class MapViewer(pyglet.window.Window):
         config = gl.Config(double_buffer=True, depth_size=24, major_version=3, minor_version=3)
         self._camera_buttons = 0
         super().__init__(width=1280, height=850, caption='DS2 Map Viewer',
-                         resizable=True, config=config, file_drops=True, vsync=True)
+                         resizable=True, config=config, file_drops=True, vsync=False)
         self.set_minimum_size(760, 480)
         self.scene = None
         self.buffer = gl.GLuint()
@@ -227,7 +227,7 @@ class MapViewer(pyglet.window.Window):
             image = pyglet.image.ImageData(1, 1, 'RGBA', bytes(rgba))
             self.constants[name] = image.get_texture()
         gl.glClearColor(.055, .07, .09, 1)
-        pyglet.clock.schedule_interval(self.update, 1/60)
+        pyglet.clock.schedule(self.update)
         initial = Path(path) if path else (self.map_paths[0] if self.map_paths else None)
         if initial:
             self.queue_load(initial)
@@ -697,10 +697,6 @@ class MapViewer(pyglet.window.Window):
         self.fps_display.draw()
         self.invalid = False
 
-    def draw(self, dt):
-        if self.invalid:
-            super().draw(dt)
-
     def update(self, dt):
         if not self.fly or not self.scene:
             return
@@ -859,7 +855,7 @@ def main():
     try:
         viewer = MapViewer(args.map, mode=('combined', 'albedo', 'lightmap', 'colors', 'meshes').index(args.mode),
                            screenshot=args.screenshot, occlusion=args.occlusion)
-        pyglet.app.run()
+        pyglet.app.run(interval=0)
     except Exception as error:
         print(f'DS2 viewer: {error}', file=sys.stderr)
         return 1

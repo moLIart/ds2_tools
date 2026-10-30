@@ -11,8 +11,13 @@ import math
 from pathlib import Path
 import sys
 
+_GL_OPTIONS = argparse.ArgumentParser(add_help=False)
+_GL_OPTIONS.add_argument('--debug-gl', action='store_true',
+                         help='Check for OpenGL errors after every GL call (slower)')
+
 import pyglet
 pyglet.options['shadow_window'] = False
+pyglet.options['debug_gl'] = _GL_OPTIONS.parse_known_args()[0].debug_gl
 from pyglet import gl
 from pyglet.graphics.shader import Shader, ShaderProgram
 from pyglet.math import Mat4, Vec3
@@ -128,6 +133,13 @@ class _GeometryBinding:
     has_colors: bool
 
 
+_BLEND_FUNCTIONS = {
+    'blend': (gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA),
+    'add': (gl.GL_ONE, gl.GL_ONE),
+    'modulate': (gl.GL_DST_COLOR, gl.GL_ZERO),
+}
+
+
 class MapViewer(pyglet.window.Window):
     def __init__(self, path=None, *, mode=0, screenshot=None):
         config = gl.Config(double_buffer=True, depth_size=24, major_version=3, minor_version=3)
@@ -142,6 +154,12 @@ class MapViewer(pyglet.window.Window):
         self.locations = {name: gl.glGetUniformLocation(self.program.id, name.encode()) for name in (
             'model', 'flip_albedo', 'flip_lightmap', 'use_lightmap', 'use_colors',
             'has_colors', 'tint', 'mesh_color', 'alpha_cutoff', 'gain', 'mode')}
+        self._uniform_values = {}
+        self._bound_model = None
+        with self.program:
+            self.program['albedo'] = 0
+            self.program['lightmap'] = 1
+        self.samplers = self._create_samplers()
         self.textures = {}
         self.opaque, self.transparent = [], []
         self.gpu_buffers = []
@@ -405,6 +423,68 @@ class MapViewer(pyglet.window.Window):
         else:
             gl.glVertexAttribPointer(location, components, gl.GL_FLOAT, gl.GL_FALSE, 0, pointer)
 
+    def _create_samplers(self):
+        samplers = (gl.GLuint * 2)()
+        try:
+            gl.glGenSamplers(2, samplers)
+            anisotropy = None
+            if (gl.gl_info.have_version(4, 6)
+                    or gl.gl_info.have_extension('GL_ARB_texture_filter_anisotropic')
+                    or gl.gl_info.have_extension('GL_EXT_texture_filter_anisotropic')):
+                anisotropy = gl.GLfloat()
+                gl.glGetFloatv(gl.GL_MAX_TEXTURE_MAX_ANISOTROPY, ctypes.byref(anisotropy))
+            for sampler, wrap in zip(samplers, (gl.GL_REPEAT, gl.GL_CLAMP_TO_EDGE)):
+                gl.glSamplerParameteri(sampler, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR)
+                gl.glSamplerParameteri(sampler, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+                gl.glSamplerParameteri(sampler, gl.GL_TEXTURE_WRAP_S, wrap)
+                gl.glSamplerParameteri(sampler, gl.GL_TEXTURE_WRAP_T, wrap)
+                if anisotropy is not None:
+                    gl.glSamplerParameterf(sampler, gl.GL_TEXTURE_MAX_ANISOTROPY, anisotropy.value)
+        except Exception:
+            gl.glDeleteSamplers(2, samplers)
+            raise
+        return samplers
+
+    def _reset_render_state(self):
+        # The UI and texture uploads can change context state between map passes.
+        # Uniforms belong to our unchanged program and keep their separate cache.
+        self._bound_geometry = None
+        self._bound_textures = [None, None]
+        self._bound_samplers = [None, None]
+        self._enabled = {}
+        self._depth_write = None
+        self._blend_function = None
+        self._polygon_offset_set = False
+
+    def _uniform1i(self, name, value):
+        if self._uniform_values.get(name) != value:
+            gl.glUniform1i(self.locations[name], value)
+            self._uniform_values[name] = value
+
+    def _uniform1f(self, name, value):
+        if self._uniform_values.get(name) != value:
+            gl.glUniform1f(self.locations[name], value)
+            self._uniform_values[name] = value
+
+    def _uniform3f(self, name, value):
+        if self._uniform_values.get(name) != value:
+            gl.glUniform3f(self.locations[name], *value)
+            self._uniform_values[name] = value
+
+    def _bind_texture(self, unit, texture, clamp):
+        if self._bound_textures[unit] != texture.id:
+            texture.bind(unit)
+            self._bound_textures[unit] = texture.id
+        sampler = self.samplers[int(clamp)]
+        if self._bound_samplers[unit] != sampler:
+            gl.glBindSampler(unit, sampler)
+            self._bound_samplers[unit] = sampler
+
+    def _capability(self, capability, enabled):
+        if self._enabled.get(capability) != enabled:
+            (gl.glEnable if enabled else gl.glDisable)(capability)
+            self._enabled[capability] = enabled
+
     def _draw_mesh(self, entry):
         mesh, mat, albedo, lightmap, flip_a, flip_l, matrix, _, binding, mesh_color = entry
         buffers = self.gpu_buffers
@@ -425,41 +505,38 @@ class MapViewer(pyglet.window.Window):
             gl.glUniformMatrix4fv(loc['model'], 1, gl.GL_TRUE, matrix)
             self._bound_model = model
         if self.mode == 4:
-            gl.glUniform3f(loc['mesh_color'], *mesh_color)
+            self._uniform3f('mesh_color', mesh_color)
         use_lm = mesh['lightmap_index'] >= 0 and not mat.self_illumination
         use_colors = not mat.self_illumination and (not use_lm or mat.vertex_colors)
-        has_colors = binding.has_colors
-        material_state = (mat, albedo.id, lightmap.id, flip_a, flip_l, use_lm, use_colors, has_colors)
-        if material_state != self._bound_material:
-            for name, value in [('flip_albedo', flip_a), ('flip_lightmap', flip_l),
-                                ('use_lightmap', use_lm), ('use_colors', use_colors),
-                                ('has_colors', has_colors)]:
-                gl.glUniform1i(loc[name], int(value))
-            gl.glUniform3f(loc['tint'], *mat.color)
-            gl.glUniform1f(loc['alpha_cutoff'], mat.alpha_cutoff)
-            gain = 1. if mat.self_illumination else (2. if use_lm or mat.overbright else 1.)
-            gl.glUniform1f(loc['gain'], gain)
-            albedo.bind(0)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE if mat.clamp else gl.GL_REPEAT)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE if mat.clamp else gl.GL_REPEAT)
-            lightmap.bind(1)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-            (gl.glEnable if mat.cull else gl.glDisable)(gl.GL_CULL_FACE)
-            # Mesh colors show solid geometry, including non-depth-writing effects.
-            (gl.glEnable if mat.depth_test or self.mode == 4 else gl.glDisable)(gl.GL_DEPTH_TEST)
-            gl.glDepthMask(gl.GL_TRUE if mat.depth_write or self.mode == 4 else gl.GL_FALSE)
-            (gl.glEnable if mat.depth_offset else gl.glDisable)(gl.GL_POLYGON_OFFSET_FILL)
-            if mat.depth_offset:
-                gl.glPolygonOffset(-1., -1.)
-            if mat.blend and self.mode == 0:
-                gl.glEnable(gl.GL_BLEND)
-                source, dest = {'blend': (gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA),
-                                'add': (gl.GL_ONE, gl.GL_ONE), 'modulate': (gl.GL_DST_COLOR, gl.GL_ZERO)}.get(mat.blend, (gl.GL_ONE, gl.GL_ZERO))
-                gl.glBlendFunc(source, dest)
-            else:
-                gl.glDisable(gl.GL_BLEND)
-            self._bound_material = material_state
+        self._uniform1i('flip_albedo', flip_a)
+        self._uniform1i('flip_lightmap', flip_l)
+        self._uniform1i('use_lightmap', use_lm)
+        self._uniform1i('use_colors', use_colors)
+        self._uniform1i('has_colors', binding.has_colors)
+        self._uniform3f('tint', mat.color)
+        self._uniform1f('alpha_cutoff', mat.alpha_cutoff)
+        gain = 1. if mat.self_illumination else (2. if use_lm or mat.overbright else 1.)
+        self._uniform1f('gain', gain)
+        self._bind_texture(0, albedo, mat.clamp)
+        self._bind_texture(1, lightmap, True)
+        self._capability(gl.GL_CULL_FACE, mat.cull)
+        # Mesh colors show solid geometry, including non-depth-writing effects.
+        self._capability(gl.GL_DEPTH_TEST, mat.depth_test or self.mode == 4)
+        depth_write = mat.depth_write or self.mode == 4
+        if self._depth_write != depth_write:
+            gl.glDepthMask(gl.GL_TRUE if depth_write else gl.GL_FALSE)
+            self._depth_write = depth_write
+        self._capability(gl.GL_POLYGON_OFFSET_FILL, mat.depth_offset)
+        if mat.depth_offset and not self._polygon_offset_set:
+            gl.glPolygonOffset(-1., -1.)
+            self._polygon_offset_set = True
+        blend = bool(mat.blend) and self.mode == 0
+        self._capability(gl.GL_BLEND, blend)
+        if blend:
+            factors = _BLEND_FUNCTIONS.get(mat.blend, (gl.GL_ONE, gl.GL_ZERO))
+            if self._blend_function != factors:
+                gl.glBlendFunc(*factors)
+                self._blend_function = factors
         for prefix, primitive in [('', gl.GL_TRIANGLES), ('strip_', gl.GL_TRIANGLE_STRIP)]:
             count = mesh[prefix+'index_count']
             if count:
@@ -483,14 +560,12 @@ class MapViewer(pyglet.window.Window):
             mvp = projection @ view
             visible = visible_mesh_indices(self.scene.metadata, mvp)
             self.visible_mesh_count = len(visible)
+            self._reset_render_state()
             with self.program:
                 self.program['mvp'] = mvp
-                self.program['albedo'] = 0
-                self.program['lightmap'] = 1
-                gl.glUniform1i(self.locations['mode'], self.mode)
+                self._uniform1i('mode', self.mode)
                 gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE if self.wireframe else gl.GL_FILL)
                 gl.glFrontFace(gl.GL_CCW)
-                self._bound_geometry = self._bound_model = self._bound_material = None
                 def opaque_order(entry):
                     mesh, material = entry[0], entry[1]
                     return (material.sort, _mesh_distance_squared(mesh, eye),
@@ -506,6 +581,9 @@ class MapViewer(pyglet.window.Window):
                 gl.glBindVertexArray(0)
                 gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
             gl.glViewport(0, 0, fw, fh)
+        # UI textures must use their own sampling parameters, not map samplers.
+        gl.glBindSampler(0, 0)
+        gl.glBindSampler(1, 0)
         gl.glDepthMask(gl.GL_TRUE)
         gl.glDisable(gl.GL_DEPTH_TEST)
         gl.glDisable(gl.GL_CULL_FACE)
@@ -665,12 +743,13 @@ class MapViewer(pyglet.window.Window):
         self._release_scene()
         for texture in self.constants.values():
             texture.delete()
+        gl.glDeleteSamplers(2, self.samplers)
         self.program.delete()
         super().close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, parents=[_GL_OPTIONS])
     parser.add_argument('map', nargs='?', type=Path)
     parser.add_argument('--mode', choices=('combined', 'albedo', 'lightmap', 'colors', 'meshes'), default='combined')
     parser.add_argument('--screenshot', type=Path, help='Save a rendered frame and exit')

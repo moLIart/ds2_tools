@@ -47,6 +47,53 @@ class MapScene:
     warnings: tuple
 
 
+def _frustum_planes(clip_matrix):
+    """OpenGL -w <= x,y,z <= w; pyglet matrices are column-major."""
+    return tuple(tuple(clip_matrix[column*4+3] + sign*clip_matrix[column*4+axis]
+                       for column in range(4))
+                 for axis in range(3) for sign in (1, -1))
+
+
+def _aabb_in_frustum(low, high, planes):
+    for a, b, c, d in planes:
+        # The supporting corner maximizes distance to this inward-facing plane.
+        x = a * (high[0] if a >= 0 else low[0])
+        y = b * (high[1] if b >= 0 else low[1])
+        z = c * (high[2] if c >= 0 else low[2])
+        # Keep boundary contacts despite f32 matrix/exporter rounding. Scaling
+        # by the terms also works for unnormalized homogeneous plane equations.
+        tolerance = 1e-6 * (abs(x) + abs(y) + abs(z) + abs(d))
+        if x + y + z + d < -tolerance:
+            return False
+    return True
+
+
+def visible_mesh_indices(metadata, clip_matrix):
+    """Collect unique frustum candidates from vistree, then test world AABBs.
+
+    Leaf bounds only intersect their meshes, rather than enclosing them: never
+    inherit a leaf's inside/outside classification as the mesh's final result.
+    Stored mesh bounds already include instance transforms.
+    """
+    planes = _frustum_planes(clip_matrix)
+    meshes, nodes = metadata['meshes'], metadata['vistree']
+    if nodes:
+        pending, candidates = [0], set()
+        while pending:
+            node = nodes[pending.pop()]
+            if not _aabb_in_frustum(node['bounds_min'], node['bounds_max'], planes):
+                continue
+            if node['leaf']:
+                candidates.update(node['mesh_indices'])
+            else:
+                pending.extend(child for child in node['children'] if child != 0xFFFFFFFF)
+    else:
+        # The format allows maps without a vistree chunk or with zero nodes.
+        candidates = range(len(meshes))
+    return {index for index in candidates
+            if _aabb_in_frustum(meshes[index]['bounds_min'], meshes[index]['bounds_max'], planes)}
+
+
 class TextureIndex:
     def __init__(self, root):
         self.root = Path(root)

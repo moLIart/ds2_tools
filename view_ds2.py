@@ -17,7 +17,7 @@ from pyglet.graphics.shader import Shader, ShaderProgram
 from pyglet.math import Mat4, Vec3
 from pyglet.window import key, mouse
 
-from ds2_scene import TextureIndex, load_map_scene, read_materials
+from ds2_scene import TextureIndex, load_map_scene, read_materials, visible_mesh_indices
 from view_ds2md import choose_file, load_albedo_texture
 
 
@@ -112,6 +112,7 @@ class MapViewer(pyglet.window.Window):
         self.textures = {}
         self.opaque, self.transparent = [], []
         self.gpu_buffers = []
+        self.visible_mesh_count = 0
         self.load_error = False
         self.mode = mode
         self.wireframe = False
@@ -223,7 +224,7 @@ class MapViewer(pyglet.window.Window):
             for destination, start, length in uploads:
                 gl.glBufferSubData(gl.GL_ARRAY_BUFFER, destination, length, ctypes.c_void_p(address + start))
             opaque, transparent = [], []
-            for mesh in scene.metadata['meshes']:
+            for mesh_index, mesh in enumerate(scene.metadata['meshes']):
                 material = scene.materials[mesh['material'].casefold()]
                 reference = mesh['textures'][0] if material.diffuse == '$diffuse$' else material.diffuse
                 albedo_source = scene.albedos[reference]
@@ -234,7 +235,7 @@ class MapViewer(pyglet.window.Window):
                 matrix = (gl.GLfloat * 16)(*(mesh.get('matrix', IDENTITY)))
                 entry = (mesh, material, albedo, lightmap,
                          isinstance(albedo_source, Path) and albedo_source.suffix.casefold() == '.tga',
-                         lm_source is not None and lm_source.suffix.casefold() == '.tga', matrix)
+                         lm_source is not None and lm_source.suffix.casefold() == '.tga', matrix, mesh_index)
                 (transparent if material.blend else opaque).append(entry)
             opaque.sort(key=lambda e: (e[1].sort, e[1].name, e[0]['vertex_buffer']))
         except Exception as error:
@@ -324,7 +325,7 @@ class MapViewer(pyglet.window.Window):
             gl.glVertexAttribPointer(location, components, gl.GL_FLOAT, gl.GL_FALSE, 0, pointer)
 
     def _draw_mesh(self, entry):
-        mesh, mat, albedo, lightmap, flip_a, flip_l, matrix = entry
+        mesh, mat, albedo, lightmap, flip_a, flip_l, matrix, _ = entry
         buffers = self.gpu_buffers
         vb, base = buffers[mesh['vertex_buffer']], mesh['vertex_start']
         colors, color_base = vb, base
@@ -394,8 +395,11 @@ class MapViewer(pyglet.window.Window):
             near, far = _map_clip_planes(eye, _camera_forward(self.yaw, self.pitch),
                                          self.scene.bounds_min, self.scene.bounds_max)
             projection = Mat4.perspective_projection(width/height, near, far, fov=50)
+            mvp = projection @ view
+            visible = visible_mesh_indices(self.scene.metadata, mvp)
+            self.visible_mesh_count = len(visible)
             with self.program:
-                self.program['mvp'] = projection @ view
+                self.program['mvp'] = mvp
                 self.program['albedo'] = 0
                 self.program['lightmap'] = 1
                 gl.glUniform1i(self.locations['mode'], self.mode)
@@ -406,12 +410,13 @@ class MapViewer(pyglet.window.Window):
                 gl.glFrontFace(gl.GL_CCW)
                 self._bound_geometry = self._bound_model = self._bound_material = None
                 for entry in self.opaque:
-                    self._draw_mesh(entry)
+                    if entry[7] in visible:
+                        self._draw_mesh(entry)
                 def order(entry):
                     m = entry[0]
                     center = tuple((a+b)*.5 for a, b in zip(m['bounds_min'], m['bounds_max']))
                     return entry[1].sort, -sum((a-b)**2 for a, b in zip(center, eye))
-                for entry in sorted(self.transparent, key=order):
+                for entry in sorted((entry for entry in self.transparent if entry[7] in visible), key=order):
                     self._draw_mesh(entry)
                 gl.glBindVertexArray(0)
                 gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
@@ -423,6 +428,9 @@ class MapViewer(pyglet.window.Window):
         gl.glDisable(gl.GL_BLEND)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         self.mode_label.text = f'{MODES[self.mode]} | {"Fly" if self.fly else "Orbit"} | speed {self.speed:.0f}'
+        if self.scene:
+            self.mode_label.text += (f' | {self.visible_mesh_count:,}/'
+                                     f'{len(self.scene.metadata["meshes"]):,} visible')
         self.ui.draw()
         self.invalid = False
 

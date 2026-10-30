@@ -83,8 +83,8 @@ def _buffer(r):
 
 def _node(r):
     out = {'offset': r.pos, 'bounds_min': r.array('f', 3),
-           'bounds_max': r.array('f', 3), 'field_24': r.value('I'),
-           'center': r.array('f', 3), 'leaf': r.value('B')}
+           'bounds_max': r.array('f', 3), 'sphere_radius': r.value('f'),
+           'sphere_center': r.array('f', 3), 'leaf': r.value('B')}
     if out['leaf']:
         out['mesh_indices'] = r.array('I', r.count(4))
     else:
@@ -183,6 +183,33 @@ def _validate(out, data):
                 fail(f'{prefix}index plus vertex base outside vertex buffer')
         if m['lightmap_index'] >= len(out['lightmaps']):
             fail('lightmap index outside table')
+    nodes = out['vistree']
+    if not nodes:
+        return
+    pending, visited, mesh_ids = [0], set(), set()
+    while pending:
+        index = pending.pop()
+        if index >= len(nodes):
+            raise ValueError(f'Vistree child {index} outside node table')
+        if index in visited:
+            raise ValueError(f'Vistree node {index} has a cycle or multiple parents')
+        visited.add(index)
+        node = nodes[index]
+        low, high = node['bounds_min'], node['bounds_max']
+        if (any(not math.isfinite(v) for v in (*low, *high))
+                or any(a > b for a, b in zip(low, high))):
+            raise ValueError(f'Vistree node {index} has invalid bounds')
+        if node['leaf']:
+            for mesh_id in node['mesh_indices']:
+                if mesh_id >= len(out['meshes']):
+                    raise ValueError(f'Vistree mesh {mesh_id} outside mesh table')
+                mesh_ids.add(mesh_id)
+        else:
+            pending.extend(child for child in node['children'] if child != 0xFFFFFFFF)
+    if len(visited) != len(nodes):
+        raise ValueError('Vistree contains nodes unreachable from root 0')
+    if len(mesh_ids) != len(out['meshes']):
+        raise ValueError('Vistree does not cover every mesh')
 
 
 def summary(path, metadata):

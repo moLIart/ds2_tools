@@ -22,7 +22,7 @@ pyglet.options['debug_gl'] = _GL_OPTIONS.parse_known_args()[0].debug_gl
 from pyglet import gl
 from pyglet.graphics.shader import Shader, ShaderException, ShaderProgram
 from pyglet.math import Mat4, Vec3
-from pyglet.window import key, mouse
+from pyglet.window import FPSDisplay, key, mouse
 
 from ds2_scene import TextureIndex, load_map_scene, read_materials, visible_mesh_indices
 from ds2_occlusion import build_occlusion_groups, group_query_safe
@@ -209,6 +209,17 @@ class MapViewer(pyglet.window.Window):
                                       font_size=10, batch=self.ui)
             self.buttons.append((rect, text, action))
         self.mode_label = pyglet.text.Label('', x=380, font_size=10, batch=self.ui)
+        self.fps_display = FPSDisplay(self, color=(255, 255, 255, 255), samples=60)
+        self.fps_display.label.text = '0.00'
+        self.fps_display.label.font_size = 12
+        self.fps_display.label.anchor_x = 'right'
+        self.fps_display.label.anchor_y = 'top'
+        self.fps_background = pyglet.shapes.Rectangle(
+            0, 0, 128, 28, color=(14, 18, 23), batch=self.ui,
+            group=pyglet.graphics.Group(order=1))
+        self.fps_caption = pyglet.text.Label(
+            'FPS', font_size=10, anchor_x='right', anchor_y='top', batch=self.ui,
+            group=pyglet.graphics.Group(order=2))
         self._layout()
         self.constants = {}
         for name, rgba in [('$white$', (255, 255, 255, 255)), ('$black$', (0, 0, 0, 255)),
@@ -230,6 +241,12 @@ class MapViewer(pyglet.window.Window):
             rect.y = self.height - 88
             text.y = self.height - 74
         self.mode_label.y = self.height - 80
+        self.fps_display.label.x = self.width - 48
+        self.fps_display.label.y = self.height - 14
+        self.fps_caption.x = self.width - 16
+        self.fps_caption.y = self.height - 16
+        self.fps_background.x = self.width - 128
+        self.fps_background.y = self.height - 38
         self.invalid = True
 
     def _status(self, text, error=False):
@@ -677,6 +694,7 @@ class MapViewer(pyglet.window.Window):
             occlusion = 'off'
         self.distance_label.text += f' | O: OCC {occlusion}'
         self.ui.draw()
+        self.fps_display.draw()
         self.invalid = False
 
     def draw(self, dt):
@@ -825,6 +843,7 @@ class MapViewer(pyglet.window.Window):
         for texture in self.constants.values():
             texture.delete()
         gl.glDeleteSamplers(2, self.samplers)
+        self.fps_display.label.delete()
         self.program.delete()
         super().close()
 

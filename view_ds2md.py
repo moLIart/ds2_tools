@@ -363,7 +363,7 @@ class ModelViewer(pyglet.window.Window):
         self.target = Vec3(0, 0, 0)
         self.radius = 1.0
         self.distance = 4.0
-        self.yaw = math.radians(-55)
+        self.yaw = math.radians(125)
         self.pitch = math.radians(20)
         self.reset_light()
         self.mesh_program = ShaderProgram(Shader(MESH_VERTEX, 'vertex'), Shader(MESH_FRAGMENT, 'fragment'))
@@ -726,7 +726,7 @@ class ModelViewer(pyglet.window.Window):
         if self.scene is not None:
             self.target = Vec3(*((a + b) * 0.5 for a, b in
                                   zip(self.bounds_min, self.bounds_max)))
-        self.yaw = math.radians(-55)
+        self.yaw = math.radians(125)
         self.pitch = math.radians(20)
         half_fov = math.radians(45) / 2
         width, height = self._model_viewport()
@@ -736,7 +736,7 @@ class ModelViewer(pyglet.window.Window):
         self.invalid = True
 
     def reset_light(self):
-        self.light_yaw = math.atan2(-0.55, 0.35)
+        self.light_yaw = math.atan2(0.55, -0.35)
         self.light_pitch = math.atan2(0.85, math.hypot(0.35, -0.55))
         self.invalid = True
 

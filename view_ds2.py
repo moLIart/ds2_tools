@@ -6,6 +6,7 @@ Requires the same requirements-viewer.txt and OpenGL 3.3 as the model viewer.
 
 import argparse
 import ctypes
+from dataclasses import dataclass
 import math
 from pathlib import Path
 import sys
@@ -50,11 +51,16 @@ uniform bool use_lightmap;
 uniform bool use_colors;
 uniform bool has_colors;
 uniform vec3 tint;
+uniform vec3 mesh_color;
 uniform float alpha_cutoff;
 uniform float gain;
 uniform int mode;
 out vec4 final_color;
 void main() {
+    if (mode == 4) {
+        final_color = vec4(mesh_color, 1.0);
+        return;
+    }
     vec2 uv = vec2(albedo_uv.x, flip_albedo ? 1.0-albedo_uv.y : albedo_uv.y);
     vec2 luv = vec2(lightmap_uv.x, flip_lightmap ? 1.0-lightmap_uv.y : lightmap_uv.y);
     vec4 base = texture(albedo, uv);
@@ -69,8 +75,14 @@ void main() {
     else final_color = vec4(has_colors ? vertex_color.rgb : vec3(0.4), 1.0);
 }
 """
-MODES = ('Combined', 'Albedo', 'Lightmap', 'Vertex colors')
+MODES = ('Combined', 'Albedo', 'Lightmap', 'Vertex colors', 'Mesh colors')
 IDENTITY = (1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.)
+
+
+def _mesh_color(mesh_index):
+    """An odd multiplier permutes RGB24: no repeats for 24-bit mesh indices."""
+    rgb = (mesh_index*0x9E3779 + 0x4F9CFF) & 0xFFFFFF
+    return ((rgb >> 16)/255., ((rgb >> 8) & 255)/255., (rgb & 255)/255.)
 
 
 def _camera_forward(yaw, pitch):
@@ -78,11 +90,12 @@ def _camera_forward(yaw, pitch):
                 -math.cos(pitch)*math.sin(yaw), -math.sin(pitch))
 
 
-def _map_clip_planes(eye, forward, bounds_min, bounds_max):
+def _map_clip_planes(eye, forward, bounds_min, bounds_max, draw_distance=None):
     """Fit depth along the actual view, independent of the old orbit target.
 
     Outside the map, a tight near plane preserves depth precision. Inside its
     bounds, keep nearby surfaces instead of using a fraction of orbit distance.
+    An optional draw distance caps forward depth, not radial mesh distance.
     """
     center_depth = sum(((low+high)*.5-eye[axis])*forward[axis]
                        for axis, (low, high) in enumerate(zip(bounds_min, bounds_max)))
@@ -91,7 +104,28 @@ def _map_clip_planes(eye, forward, bounds_min, bounds_max):
     padding = max(1., half_depth*.01)
     near = max(.5, center_depth-half_depth-padding)
     far = max(near+1., center_depth+half_depth+padding)
+    if draw_distance is not None:
+        far = min(far, draw_distance)
+        # The map can lie entirely beyond the cap, including its fitted near.
+        near = min(near, far-.5)
     return near, far
+
+
+def _mesh_distance_squared(mesh, eye):
+    """Distance to the world-space AABB center; instance transforms are baked in."""
+    low, high = mesh['bounds_min'], mesh['bounds_max']
+    x = (low[0]+high[0])*.5-eye[0]
+    y = (low[1]+high[1])*.5-eye[1]
+    z = (low[2]+high[2])*.5-eye[2]
+    return x*x + y*y + z*z
+
+
+@dataclass(frozen=True, slots=True)
+class _GeometryBinding:
+    vao: gl.GLuint
+    has_uv: bool
+    has_lightmap_uv: bool
+    has_colors: bool
 
 
 class MapViewer(pyglet.window.Window):
@@ -103,12 +137,11 @@ class MapViewer(pyglet.window.Window):
         self.set_minimum_size(760, 480)
         self.scene = None
         self.buffer = gl.GLuint()
-        self.vao = gl.GLuint()
-        gl.glGenVertexArrays(1, ctypes.byref(self.vao))
+        self.geometry_bindings = {}
         self.program = ShaderProgram(Shader(VERTEX, 'vertex'), Shader(FRAGMENT, 'fragment'))
         self.locations = {name: gl.glGetUniformLocation(self.program.id, name.encode()) for name in (
             'model', 'flip_albedo', 'flip_lightmap', 'use_lightmap', 'use_colors',
-            'has_colors', 'tint', 'alpha_cutoff', 'gain', 'mode')}
+            'has_colors', 'tint', 'mesh_color', 'alpha_cutoff', 'gain', 'mode')}
         self.textures = {}
         self.opaque, self.transparent = [], []
         self.gpu_buffers = []
@@ -118,6 +151,7 @@ class MapViewer(pyglet.window.Window):
         self.wireframe = False
         self.fly = False
         self.speed = 200.0
+        self.draw_distance = None
         self.eye = Vec3(0, 0, 0)
         self.target = Vec3(0, 0, 0)
         self.yaw, self.pitch, self.distance, self.radius = -.9, .4, 10., 1.
@@ -136,8 +170,9 @@ class MapViewer(pyglet.window.Window):
                                         batch=self.ui, color=(190, 200, 214, 255))
         self.controls = pyglet.text.Label(
             'LMB orbit | MMB pan | Wheel zoom/speed | RMB fly-look | F fly/orbit | WASD, Q/E move | Shift fast\n'
-            '1 combined | 2 albedo | 3 lightmap | 4 vertex colors | G wireframe | Home fit | [ / ] previous/next map | Ctrl+O open',
+            '1 combined | 2 albedo | 3 lightmap | 4 vertex colors | 5 mesh colors | G wireframe | Home fit | [ / ] previous/next map | Ctrl+O open',
             x=16, y=64, font_size=9, multiline=True, width=1240, batch=self.ui)
+        self.distance_label = pyglet.text.Label('', x=16, y=32, font_size=9, batch=self.ui)
         self.buttons = []
         for label, x, width, action in [('Open...', 16, 90, self.open_file),
                                        ('< Map', 114, 80, lambda: self.change_map(-1)),
@@ -200,6 +235,7 @@ class MapViewer(pyglet.window.Window):
         path, self.pending = self.pending, None
         loaded, warnings = {}, []
         new_buffer = gl.GLuint()
+        new_bindings = {}
         try:
             scene = load_map_scene(path, self.texture_index, self.materials)
             warnings.extend(scene.warnings)
@@ -232,13 +268,18 @@ class MapViewer(pyglet.window.Window):
                 lm_index = mesh['lightmap_index']
                 lm_source = scene.lightmaps[lm_index] if lm_index >= 0 else None
                 lightmap = self._texture(lm_source, loaded, warnings) if lm_index >= 0 else self.constants['$white$']
+                binding = self._prepare_geometry(mesh, gpu_buffers, new_buffer, new_bindings)
                 matrix = (gl.GLfloat * 16)(*(mesh.get('matrix', IDENTITY)))
                 entry = (mesh, material, albedo, lightmap,
                          isinstance(albedo_source, Path) and albedo_source.suffix.casefold() == '.tga',
-                         lm_source is not None and lm_source.suffix.casefold() == '.tga', matrix, mesh_index)
+                         lm_source is not None and lm_source.suffix.casefold() == '.tga',
+                         matrix, mesh_index, binding, _mesh_color(mesh_index))
                 (transparent if material.blend else opaque).append(entry)
-            opaque.sort(key=lambda e: (e[1].sort, e[1].name, e[0]['vertex_buffer']))
+            gl.glBindVertexArray(0)
         except Exception as error:
+            gl.glBindVertexArray(0)
+            for binding in new_bindings.values():
+                gl.glDeleteVertexArrays(1, ctypes.byref(binding.vao))
             if new_buffer.value:
                 gl.glDeleteBuffers(1, ctypes.byref(new_buffer))
             for texture in loaded.values():
@@ -253,6 +294,7 @@ class MapViewer(pyglet.window.Window):
         self._release_scene()
         self.scene, self.buffer, self.textures = scene, new_buffer, loaded
         self.gpu_buffers = gpu_buffers
+        self.geometry_bindings = new_bindings
         self.load_error = False
         self.opaque, self.transparent = opaque, transparent
         self.frame_map()
@@ -270,6 +312,9 @@ class MapViewer(pyglet.window.Window):
             pyglet.clock.schedule_once(self._capture, .25)
 
     def _release_scene(self):
+        for binding in self.geometry_bindings.values():
+            gl.glDeleteVertexArrays(1, ctypes.byref(binding.vao))
+        self.geometry_bindings.clear()
         if self.buffer.value:
             gl.glDeleteBuffers(1, ctypes.byref(self.buffer))
             self.buffer = gl.GLuint()
@@ -308,6 +353,42 @@ class MapViewer(pyglet.window.Window):
         self.fly = enabled
         self.invalid = True
 
+    def _adjust_draw_distance(self, factor):
+        if self.draw_distance is None:
+            if not self.scene:
+                return
+            eye = self._camera()[0]
+            _, distance = _map_clip_planes(
+                eye, _camera_forward(self.yaw, self.pitch),
+                self.scene.bounds_min, self.scene.bounds_max)
+        else:
+            distance = self.draw_distance
+        self.draw_distance = max(1., min(1e8, distance*factor))
+        self.invalid = True
+
+    def _prepare_geometry(self, mesh, buffers, buffer, bindings):
+        vertex_buffer, base = mesh['vertex_buffer'], mesh['vertex_start']
+        color_buffer, color_base = vertex_buffer, base
+        if mesh['instanced'] and mesh['instance_fields'][0] != 0xFFFFFFFF:
+            color_buffer, color_base = mesh['instance_fields']
+        key = vertex_buffer, base, color_buffer, color_base
+        binding = bindings.get(key)
+        if binding is not None:
+            return binding
+        vb, colors = buffers[vertex_buffer], buffers[color_buffer]
+        binding = _GeometryBinding(gl.GLuint(), 'uv_offset' in vb,
+                                   'lightmap_uv_offset' in vb, 'colors_offset' in colors)
+        bindings[key] = binding
+        gl.glGenVertexArrays(1, ctypes.byref(binding.vao))
+        gl.glBindVertexArray(binding.vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, buffer)
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, buffer)
+        self._attribute(0, vb, 'positions', base, 3)
+        self._attribute(1, vb, 'uv', base, 2)
+        self._attribute(2, vb, 'lightmap_uv', base, 2)
+        self._attribute(3, colors, 'colors', color_base, 4, True)
+        return binding
+
     def _attribute(self, location, buffer, name, base, components, integer=False):
         field = name + '_offset'
         if field not in buffer:
@@ -325,27 +406,29 @@ class MapViewer(pyglet.window.Window):
             gl.glVertexAttribPointer(location, components, gl.GL_FLOAT, gl.GL_FALSE, 0, pointer)
 
     def _draw_mesh(self, entry):
-        mesh, mat, albedo, lightmap, flip_a, flip_l, matrix, _ = entry
+        mesh, mat, albedo, lightmap, flip_a, flip_l, matrix, _, binding, mesh_color = entry
         buffers = self.gpu_buffers
-        vb, base = buffers[mesh['vertex_buffer']], mesh['vertex_start']
-        colors, color_base = vb, base
-        if mesh['instanced'] and mesh['instance_fields'][0] != 0xFFFFFFFF:
-            colors, color_base = buffers[mesh['instance_fields'][0]], mesh['instance_fields'][1]
-        geometry_state = (id(vb), base, id(colors), color_base)
-        if geometry_state != self._bound_geometry:
-            self._attribute(0, vb, 'positions', base, 3)
-            self._attribute(1, vb, 'uv', base, 2)
-            self._attribute(2, vb, 'lightmap_uv', base, 2)
-            self._attribute(3, colors, 'colors', color_base, 4, True)
-            self._bound_geometry = geometry_state
+        if binding is not self._bound_geometry:
+            gl.glBindVertexArray(binding.vao)
+            # Disabled attributes use context-global values, not VAO state.
+            # Restore them after draws that may have enabled these attributes.
+            if not binding.has_uv:
+                gl.glVertexAttrib2f(1, 0, 0)
+            if not binding.has_lightmap_uv:
+                gl.glVertexAttrib2f(2, 0, 0)
+            if not binding.has_colors:
+                gl.glVertexAttribI4ui(3, 255, 255, 255, 255)
+            self._bound_geometry = binding
         loc = self.locations
         model = mesh.get('matrix', IDENTITY)
         if model != self._bound_model:
             gl.glUniformMatrix4fv(loc['model'], 1, gl.GL_TRUE, matrix)
             self._bound_model = model
+        if self.mode == 4:
+            gl.glUniform3f(loc['mesh_color'], *mesh_color)
         use_lm = mesh['lightmap_index'] >= 0 and not mat.self_illumination
         use_colors = not mat.self_illumination and (not use_lm or mat.vertex_colors)
-        has_colors = 'colors_offset' in colors
+        has_colors = binding.has_colors
         material_state = (mat, albedo.id, lightmap.id, flip_a, flip_l, use_lm, use_colors, has_colors)
         if material_state != self._bound_material:
             for name, value in [('flip_albedo', flip_a), ('flip_lightmap', flip_l),
@@ -363,8 +446,9 @@ class MapViewer(pyglet.window.Window):
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
             (gl.glEnable if mat.cull else gl.glDisable)(gl.GL_CULL_FACE)
-            (gl.glEnable if mat.depth_test else gl.glDisable)(gl.GL_DEPTH_TEST)
-            gl.glDepthMask(gl.GL_TRUE if mat.depth_write else gl.GL_FALSE)
+            # Mesh colors show solid geometry, including non-depth-writing effects.
+            (gl.glEnable if mat.depth_test or self.mode == 4 else gl.glDisable)(gl.GL_DEPTH_TEST)
+            gl.glDepthMask(gl.GL_TRUE if mat.depth_write or self.mode == 4 else gl.GL_FALSE)
             (gl.glEnable if mat.depth_offset else gl.glDisable)(gl.GL_POLYGON_OFFSET_FILL)
             if mat.depth_offset:
                 gl.glPolygonOffset(-1., -1.)
@@ -393,7 +477,8 @@ class MapViewer(pyglet.window.Window):
             gl.glViewport(0, round(80*scale), fw, max(1, round(height*scale)))
             eye, view = self._camera()
             near, far = _map_clip_planes(eye, _camera_forward(self.yaw, self.pitch),
-                                         self.scene.bounds_min, self.scene.bounds_max)
+                                         self.scene.bounds_min, self.scene.bounds_max,
+                                         draw_distance=self.draw_distance)
             projection = Mat4.perspective_projection(width/height, near, far, fov=50)
             mvp = projection @ view
             visible = visible_mesh_indices(self.scene.metadata, mvp)
@@ -403,20 +488,20 @@ class MapViewer(pyglet.window.Window):
                 self.program['albedo'] = 0
                 self.program['lightmap'] = 1
                 gl.glUniform1i(self.locations['mode'], self.mode)
-                gl.glBindVertexArray(self.vao)
-                gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.buffer)
-                gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.buffer)
                 gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE if self.wireframe else gl.GL_FILL)
                 gl.glFrontFace(gl.GL_CCW)
                 self._bound_geometry = self._bound_model = self._bound_material = None
-                for entry in self.opaque:
-                    if entry[7] in visible:
-                        self._draw_mesh(entry)
-                def order(entry):
-                    m = entry[0]
-                    center = tuple((a+b)*.5 for a, b in zip(m['bounds_min'], m['bounds_max']))
-                    return entry[1].sort, -sum((a-b)**2 for a, b in zip(center, eye))
-                for entry in sorted((entry for entry in self.transparent if entry[7] in visible), key=order):
+                def opaque_order(entry):
+                    mesh, material = entry[0], entry[1]
+                    return (material.sort, _mesh_distance_squared(mesh, eye),
+                            material.name, mesh['vertex_buffer'])
+                for entry in sorted((entry for entry in self.opaque if entry[7] in visible),
+                                    key=opaque_order):
+                    self._draw_mesh(entry)
+                def transparent_order(entry):
+                    return entry[1].sort, -_mesh_distance_squared(entry[0], eye)
+                for entry in sorted((entry for entry in self.transparent if entry[7] in visible),
+                                    key=transparent_order):
                     self._draw_mesh(entry)
                 gl.glBindVertexArray(0)
                 gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
@@ -431,6 +516,9 @@ class MapViewer(pyglet.window.Window):
         if self.scene:
             self.mode_label.text += (f' | {self.visible_mesh_count:,}/'
                                      f'{len(self.scene.metadata["meshes"]):,} visible')
+        distance = 'Auto' if self.draw_distance is None else f'{self.draw_distance:,.1f}'
+        self.distance_label.text = (f'Draw distance: {distance} | '
+                                    'PgUp/PgDn increase/decrease | End auto')
         self.ui.draw()
         self.invalid = False
 
@@ -520,14 +608,20 @@ class MapViewer(pyglet.window.Window):
     def on_key_press(self, symbol, modifiers):
         if symbol == key.O and modifiers & key.MOD_CTRL:
             self.open_file()
-        elif symbol in (key._1, key._2, key._3, key._4):
-            self.mode = (key._1, key._2, key._3, key._4).index(symbol)
+        elif symbol in (key._1, key._2, key._3, key._4, key._5):
+            self.mode = (key._1, key._2, key._3, key._4, key._5).index(symbol)
         elif symbol == key.HOME:
             self.frame_map()
         elif symbol == key.F:
             self._set_fly(not self.fly)
         elif symbol == key.G:
             self.wireframe = not self.wireframe
+        elif symbol == key.PAGEUP:
+            self._adjust_draw_distance(1.25)
+        elif symbol == key.PAGEDOWN:
+            self._adjust_draw_distance(.8)
+        elif symbol == key.END:
+            self.draw_distance = None
         elif symbol in (key.BRACKETLEFT, key.BRACKETRIGHT):
             self.change_map(-1 if symbol == key.BRACKETLEFT else 1)
         elif symbol == key.ESCAPE:
@@ -571,7 +665,6 @@ class MapViewer(pyglet.window.Window):
         self._release_scene()
         for texture in self.constants.values():
             texture.delete()
-        gl.glDeleteVertexArrays(1, ctypes.byref(self.vao))
         self.program.delete()
         super().close()
 
@@ -579,11 +672,11 @@ class MapViewer(pyglet.window.Window):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('map', nargs='?', type=Path)
-    parser.add_argument('--mode', choices=('combined', 'albedo', 'lightmap', 'colors'), default='combined')
+    parser.add_argument('--mode', choices=('combined', 'albedo', 'lightmap', 'colors', 'meshes'), default='combined')
     parser.add_argument('--screenshot', type=Path, help='Save a rendered frame and exit')
     args = parser.parse_args()
     try:
-        viewer = MapViewer(args.map, mode=('combined', 'albedo', 'lightmap', 'colors').index(args.mode), screenshot=args.screenshot)
+        viewer = MapViewer(args.map, mode=('combined', 'albedo', 'lightmap', 'colors', 'meshes').index(args.mode), screenshot=args.screenshot)
         pyglet.app.run()
     except Exception as error:
         print(f'DS2 viewer: {error}', file=sys.stderr)

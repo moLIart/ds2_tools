@@ -71,6 +71,23 @@ class MapCameraTests(unittest.TestCase):
         self.assertGreater(far, 10100.)
         self.assertLess(far/near, 1.1)
 
+    def test_draw_distance_caps_depth_even_when_map_is_beyond_it(self):
+        eye, forward = Vec3(0, -10000, 0), Vec3(0, 1, 0)
+        low, high = Vec3(-100, -100, -100), Vec3(100, 100, 100)
+        view = Mat4.look_at(eye, eye+forward, Vec3(0, 0, 1))
+        for limit in (1., 100., 10000.):
+            with self.subTest(limit=limit):
+                near, far = _map_clip_planes(eye, forward, low, high, draw_distance=limit)
+                self.assertEqual(far, limit)
+                self.assertGreater(near, 0.)
+                self.assertLess(near, far)
+                projection = Mat4.perspective_projection(1., near, far, fov=50)
+                inside = projection @ view @ Vec4(*(eye+forward*((near+far)*.5)), 1)
+                outside = projection @ view @ Vec4(*(eye+forward*(far+1.)), 1)
+                self.assertGreater(inside.z/inside.w, -1.)
+                self.assertLess(inside.z/inside.w, 1.)
+                self.assertGreater(outside.z/outside.w, 1.)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,19 +1,9 @@
-"""Static geometry and local albedo references from standard binary DS2MD files.
+"""Geometry, skeletal data and local albedo references from binary DS2MD files.
 
-Positions remain in the space stored in the file, not an evaluated skeletal pose.
-In ds2render.dll (preferred base 0x10000000), the standard mesh reader stores the
-position block at mesh+0x40 in 0x100C3043-0x100C3046. Vertex-buffer preparation
-copies those triples unchanged in 0x100C1F50-0x100C1F6D (skinned path) and
-0x100C2301-0x100C231F (static/rigid path); it normalizes normals separately.
-The rigid path records a bone index at 0x100C24EE, and drawing obtains a bone
-matrix at 0x100C45C5-0x100C45E6. Bone matrices are accumulated through parents
-at 0x100CB23F onward. None of that establishes that applying each serialized
-local rest matrix directly to the stored positions would recover a bind pose.
-
-Consequently this loader deliberately does not invent a rest/skinning transform
-or mix a bone overlay into an unverified coordinate space. In particular,
-svin.ds2md's stored vertex bounds differ from its serialized mesh AABB. Camera
-bounds below always describe the actual returned vertices, not that AABB.
+Vertex arrays remain in their stored bind space. The renderer applies the
+animated global bone matrix times inverse global bind, as established by
+ds2render.dll:0x100CD657 and 0x100D7C00 (preferred base 0x10000000).
+Bounds here describe the stored vertices; the viewer evaluates animated bounds.
 """
 
 from dataclasses import dataclass
@@ -23,8 +13,10 @@ import struct
 
 if __package__:
     from .inspect_ds2md import UnsupportedVersion, parse_model
+    from .ds2md_animation import Skeleton, load_skeleton
 else:
     from inspect_ds2md import UnsupportedVersion, parse_model
+    from ds2md_animation import Skeleton, load_skeleton
 
 
 # A viewer safety policy, not a restriction claimed for the DS2MD format.
@@ -41,6 +33,8 @@ class Mesh:
     uv_coords: tuple[float, ...]
     albedo_path: Path | None
     albedo_reference: str
+    influence_ranges: tuple[int, ...]
+    influences: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +47,7 @@ class Scene:
     bounds_max: tuple[float, float, float]
     note: str
     texture_warnings: tuple[str, ...]
+    skeleton: Skeleton | None
 
 
 def _strip_triangles(
@@ -132,13 +127,14 @@ def load_scene(path: Path | str) -> Scene:
     if len(data) != metadata['file_size']:
         raise ValueError("The model changed while it was being opened; open it again.")
 
+    skeleton = load_skeleton(metadata, data)
+    bone_count = len(skeleton.bones) if skeleton is not None else 0
     meshes = []
     images = _texture_index()
     texture_warnings = []
     lower = [float('inf')] * 3
     upper = [float('-inf')] * 3
     triangle_count = 0
-    skinned = False
     for number, source in enumerate(metadata['meshes'], 1):
         name = f"{number:02d}: {source['material'] or '(unnamed material)'}"
         count = source['vertex_count']
@@ -157,6 +153,28 @@ def load_scene(path: Path | str) -> Scene:
             )
         if any(not isfinite(value) for value in normals):
             raise ValueError(f"Mesh {name} contains non-finite vertex normals.")
+        ranges = []
+        influences = []
+        assignment_offset = source['assignments_offset']
+        for _ in range(count):
+            start = len(influences) // 2
+            influence_count = 0
+            if source['influence_mode']:
+                influence_count = data[assignment_offset]
+                assignment_offset += 1
+                if influence_count >= 10:
+                    raise ValueError(f"Mesh {name} has more than nine influences per vertex.")
+                for _ in range(influence_count):
+                    bone, weight = struct.unpack_from('<Hf', data, assignment_offset)
+                    assignment_offset += 6
+                    if bone >= bone_count:
+                        raise ValueError(f"Mesh {name} refers to missing bone {bone}.")
+                    if not isfinite(weight) or weight < 0.0:
+                        raise ValueError(f"Mesh {name} contains an invalid bone weight.")
+                    influences.extend((float(bone), weight))
+            ranges.extend((start, influence_count))
+        if assignment_offset != source['end']:
+            raise ValueError(f"Mesh {name} has inconsistent influence data.")
         # Check against these bytes too: the metadata parser opens the path itself.
         if indices and max(indices) >= count:
             raise ValueError(f"Mesh {name} has an index outside its vertex array.")
@@ -165,7 +183,6 @@ def load_scene(path: Path | str) -> Scene:
         elif len(indices) % 3:
             raise ValueError(f"Mesh {name} has an incomplete triangle list.")
         triangle_count += len(indices) // 3
-        skinned |= bool(source['skinning_count'] or source['influence_mode'])
         for offset in range(0, len(positions), 3):
             for axis in range(3):
                 value = positions[offset + axis]
@@ -176,14 +193,15 @@ def load_scene(path: Path | str) -> Scene:
         if warning:
             texture_warnings.append(warning)
         meshes.append(
-            Mesh(name, positions, normals, indices, uv_coords, albedo_path, reference)
+            Mesh(name, positions, normals, indices, uv_coords, albedo_path, reference,
+                 tuple(ranges), tuple(influences))
         )
 
     if not triangle_count:
         raise ValueError("The model contains no renderable triangles.")
-    note = "Stored vertex-space preview; camera fits the displayed geometry."
-    if metadata['has_skeleton'] or skinned:
-        note += " Skeletal pose transforms are not applied."
+    note = "Bind-space geometry; camera fits the displayed pose."
+    if skeleton is not None:
+        note += f" {len(skeleton.bones)} bones; {len(skeleton.clips)} animation clips."
     return Scene(
         path=path,
         name=metadata['name'] or path.stem,
@@ -193,4 +211,5 @@ def load_scene(path: Path | str) -> Scene:
         bounds_max=tuple(upper),
         note=note,
         texture_warnings=tuple(texture_warnings),
+        skeleton=skeleton,
     )

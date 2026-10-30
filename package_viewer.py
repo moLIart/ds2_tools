@@ -20,6 +20,7 @@ SOURCE_DIR = Path(__file__).resolve().parent
 RUNTIME_FILES = (
     'view_ds2md.py',
     'ds2md_scene.py',
+    'ds2md_animation.py',
     'inspect_ds2md.py',
     'requirements-viewer.txt',
 )

@@ -73,6 +73,7 @@ def parse_model(path):
             mesh[name + '_offset'] = r.pos
             r.take(mesh['vertex_count'] * stride)
         mesh['influence_mode'] = r.value('B')
+        mesh['assignments_offset'] = r.pos
         counts = Counter()
         if mesh['influence_mode']:
             for _ in range(mesh['vertex_count']):

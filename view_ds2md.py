@@ -92,6 +92,24 @@ PALETTE = ((0.76, 0.79, 0.82), (0.68, 0.73, 0.77), (0.78, 0.74, 0.68),
            (0.66, 0.73, 0.71), (0.74, 0.70, 0.75))
 
 
+def _clip_planes(eye, target, distance, bounds_min, bounds_max):
+    """Fit visible depth, with a stable near floor when the eye enters bounds.
+
+    distance is the positive orbit distance. Do not collapse near to an epsilon
+    when an animated bounding volume crosses the eye: that destroys 24-bit depth
+    precision and causes temporal surface fighting.
+    """
+    forward = tuple((target[axis] - eye[axis]) / distance for axis in range(3))
+    center_depth = sum(((low + high) * 0.5 - eye[axis]) * forward[axis]
+                       for axis, (low, high) in enumerate(zip(bounds_min, bounds_max)))
+    half_depth = sum((high - low) * 0.5 * abs(forward[axis])
+                     for axis, (low, high) in enumerate(zip(bounds_min, bounds_max)))
+    padding = max(half_depth * 0.1, distance * 0.001)
+    near = max(distance * 0.01, center_depth - half_depth - padding)
+    far = max(near + padding, center_depth + half_depth + padding)
+    return near, far
+
+
 class FloatTexture:
     """Packed RG/RGBA float data using pyglet-supported sampler2D uniforms."""
 
@@ -309,6 +327,7 @@ class ModelViewer(pyglet.window.Window):
         self.mesh_lists = []
         self.albedo_textures = {}
         self.grid_list = None
+        self.grid_bounds = None
         self.animator = None
         self.palette_buffer = None
         self.bounds_cache = None
@@ -598,6 +617,8 @@ class ModelViewer(pyglet.window.Window):
             radius = max(math.sqrt(sum((b - a) ** 2 for a, b in zip(low, high))) * 0.5, 0.001)
             extent = radius * 1.5
             z = low[2] - radius * 0.005
+            grid_bounds = ((center.x - extent, center.y - extent, z),
+                           (center.x + extent, center.y + extent, z))
             grid_vertices = []
             for step in range(-10, 11):
                 offset = step * extent / 10
@@ -624,6 +645,7 @@ class ModelViewer(pyglet.window.Window):
         self.mesh_lists = meshes
         self.albedo_textures = textures
         self.grid_list = grid
+        self.grid_bounds = grid_bounds
         self.animator = animator
         self.palette_buffer = palette
         self.bounds_cache = bounds_cache
@@ -674,6 +696,7 @@ class ModelViewer(pyglet.window.Window):
         if self.grid_list is not None:
             self.grid_list.delete()
             self.grid_list = None
+        self.grid_bounds = None
 
     def _model_viewport(self):
         # Reserve header and playback controls instead of drawing through them.
@@ -724,12 +747,11 @@ class ModelViewer(pyglet.window.Window):
             gl.glDepthFunc(gl.GL_LEQUAL)
             gl.glDisable(gl.GL_CULL_FACE)
             eye, view = self._camera()
-            center = Vec3(*((a + b) * 0.5 for a, b in
-                            zip(self.bounds_min, self.bounds_max)))
-            center_distance = (eye - center).length()
-            far = max(center_distance + self.radius * 5, self.radius * 10)
-            near = max(self.radius * 0.000001,
-                       min(self.radius * 0.0001, max(0.0, center_distance - self.radius) * 0.5))
+            low, high = self.bounds_min, self.bounds_max
+            if self.show_grid and self.grid_bounds is not None:
+                low = tuple(min(a, b) for a, b in zip(low, self.grid_bounds[0]))
+                high = tuple(max(a, b) for a, b in zip(high, self.grid_bounds[1]))
+            near, far = _clip_planes(eye, self.target, self.distance, low, high)
             projection = Mat4.perspective_projection(width / height,
                                                     near, far, fov=45)
             mvp = projection @ view

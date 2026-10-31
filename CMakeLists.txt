@@ -22,15 +22,28 @@ qt_add_shaders(viewer_common viewer_shaders
     PREFIX "/shaders" BASE "viewer/shaders"
     GLSL "330,300es" HLSL 50 MSL 12
     FILES viewer/shaders/scene.vert viewer/shaders/scene.frag)
+# Qt deployment requires an absolute prefix, even with a relative --prefix.
+install(CODE [[
+    cmake_path(ABSOLUTE_PATH CMAKE_INSTALL_PREFIX NORMALIZE)
+]])
 foreach(viewer IN ITEMS ds2_view ds2md_view)
     qt_add_executable(${viewer} viewer/main.cpp)
     target_link_libraries(${viewer} PRIVATE viewer_common)
     if(viewer STREQUAL "ds2_view")
         target_compile_definitions(${viewer} PRIVATE DS2_MAP_VIEWER=1)
     endif()
+    install(TARGETS ${viewer}
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        BUNDLE DESTINATION .)
     if(WIN32)
         add_custom_command(TARGET ${viewer} POST_BUILD
             COMMAND "${QT6_INSTALL_PREFIX}/bin/windeployqt.exe" --no-translations --no-opengl-sw "$<TARGET_FILE:${viewer}>"
             COMMENT "Deploying Qt runtime for ${viewer}" VERBATIM)
+        qt_generate_deploy_app_script(
+            TARGET ${viewer}
+            OUTPUT_SCRIPT deploy_script
+            NO_TRANSLATIONS
+            DEPLOY_TOOL_OPTIONS --no-opengl-sw)
+        install(SCRIPT "${deploy_script}")
     endif()
 endforeach()

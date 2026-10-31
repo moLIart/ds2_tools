@@ -33,6 +33,7 @@ class TimelineSlider final : public QSlider {
             QSlider::mousePressEvent(event);
             return;
         }
+
         setSliderDown(true);
         seek(event->position().x());
         event->accept();
@@ -66,6 +67,7 @@ class TimelineSlider final : public QSlider {
 QString findGameRoot(const QString &path, const QString &explicitRoot) {
     if (!explicitRoot.isEmpty())
         return QDir(explicitRoot).absolutePath();
+
     for (const auto &start :
          {QFileInfo(path).absolutePath(), QDir::currentPath(), QApplication::applicationDirPath()}) {
         QDir d(start);
@@ -74,6 +76,7 @@ QString findGameRoot(const QString &path, const QString &explicitRoot) {
                 return d.absolutePath();
         } while (d.cdUp());
     }
+
     return QDir::currentPath();
 }
 QAction *ViewerWindow::action(const QString &text, const QKeySequence &shortcut,
@@ -82,6 +85,7 @@ QAction *ViewerWindow::action(const QString &text, const QKeySequence &shortcut,
     a->setCheckable(check);
     if (!shortcut.isEmpty())
         a->setShortcut(shortcut);
+
     connect(a, &QAction::triggered, this, [callback = std::move(callback)] { callback(); });
     return a;
 }
@@ -109,6 +113,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         m_export->setToolTip("Export the model, all animation clips, and embedded textures");
         m_export->setEnabled(false);
     }
+
     if (map) {
         m_toolbar->addWidget(new QLabel(QStringLiteral("Map: "), m_toolbar));
         m_maps = new QComboBox(m_toolbar);
@@ -121,6 +126,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         connect(m_maps, &QComboBox::activated, this,
                 [this](int index) { load(m_maps->itemData(index).toString()); });
     }
+
     action("Fit", QKeySequence(map ? "Home" : "F"), [this] { m_view->fit(); });
     m_wire = action(
         "Wire", QKeySequence(map ? "G" : "W"),
@@ -153,6 +159,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
             addAction(a);
             connect(a, &QAction::triggered, this, [this, i] { m_modes->setCurrentIndex(i); });
         }
+
         m_toolbar->addSeparator();
         m_toolbar->addWidget(new QLabel("Distance: ", m_toolbar));
         m_distance = new QDoubleSpinBox(m_toolbar);
@@ -168,6 +175,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
                 m_distance->setValue(1);
                 return;
             }
+
             m_view->camera.drawDistance = float(v);
             m_view->update();
         });
@@ -176,6 +184,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
             auto scene = m_view->scene();
             if (!scene)
                 return;
+
             const float d = c.drawDistance > 0 ? c.drawDistance : c.planes(scene->bounds, false).second;
             m_distance->setValue(std::clamp(d * factor, 1.f, 1e8f));
         };
@@ -192,9 +201,11 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         QDirIterator it(mapsDir.path(), {"*.ds2"}, QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext())
             maps.append(QFileInfo(it.next()).absoluteFilePath());
+
         maps.sort();
         for (const auto &mapPath : maps)
             m_maps->addItem(mapsDir.relativeFilePath(mapPath), mapPath);
+
         m_maps->setCurrentIndex(-1);
     } else {
         auto *grid = action(
@@ -252,6 +263,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         connect(faster, &QAction::triggered, this, [this] { m_speed->setValue(m_speed->value() * 2); });
         addToolBar(Qt::BottomToolBarArea, new QToolBar("Playback", this));
     }
+
     action("Controls", {}, [this] {
         m_view->releaseMouseCapture();
         QMessageBox::information(
@@ -300,10 +312,12 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         connect(m_timeline, &QSlider::sliderReleased, this, [this] {
             if (auto a = animation())
                 a->playing = m_resume;
+
             m_seeking = false;
             sync();
         });
     }
+
     m_view->keyAction = [this](int key, Qt::KeyboardModifiers mods) {
         if (!m_map) {
             if (key == Qt::Key_Home)
@@ -325,8 +339,10 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         qsizetype vertices = 0, triangles = 0;
         for (const auto &g : scene->geometries)
             vertices += g.vertices.size();
+
         for (const auto &m : scene->meshes)
             triangles += m.indices.size() / 3;
+
         statusBar()->setToolTip(scene->path + '\n' + scene->note + '\n' + scene->warnings.join('\n'));
         statusBar()->showMessage(QString("%1 | %2 vertices | %3 triangles%4")
                                      .arg(scene->name)
@@ -338,6 +354,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
                                                                           .arg(scene->warnings.first())));
         for (const auto &w : scene->warnings)
             qWarning().noquote() << QFileInfo(scene->path).fileName() + ": " + w;
+
         if (m_maps) {
             int index = m_maps->findData(scene->path);
             if (index < 0) {
@@ -345,8 +362,10 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
                 m_maps->addItem(mapsDir.relativeFilePath(scene->path), scene->path);
                 index = m_maps->count() - 1;
             }
+
             m_maps->setCurrentIndex(index);
         }
+
         if (m_clips) {
             QSignalBlocker blocker(m_clips);
             m_clips->clear();
@@ -355,19 +374,23 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
                 for (int i = 0; i < a->clipCount(); ++i)
                     m_clips->addItem(a->clipName(i));
         }
+
         if (m_bind)
             m_bind->setText(scene->sampledAnimation ? "Stored" : "Bind");
+
         sync();
         m_view->setFocus();
         if (!m_screenshot.isEmpty())
             QTimer::singleShot(200, this, [this] {
                 if (!m_loaded)
                     return;
+
                 auto image = m_view->grabFramebuffer();
                 if (image.isNull() || !image.save(m_screenshot)) {
                     error("Cannot save screenshot: " + m_screenshot);
                     return;
                 }
+
                 qInfo().noquote() << "Saved" << m_screenshot;
                 QApplication::exit(0);
             });
@@ -391,6 +414,7 @@ void ViewerWindow::error(const QString &message) {
         const auto &scene = m_view->scene();
         m_maps->setCurrentIndex(scene ? m_maps->findData(scene->path) : -1);
     }
+
     if (!m_screenshot.isEmpty())
         QTimer::singleShot(0, [] { QApplication::exit(1); });
 }
@@ -401,6 +425,7 @@ void ViewerWindow::load(const QString &path) {
     QTimer::singleShot(20, this, [this, path = m_pending] {
         if (path != m_pending)
             return;
+
         try {
             auto scene = std::make_shared<Scene>(m_map ? loadMap(path, m_root) : loadModel(path, m_root));
             m_view->setScene(std::move(scene));
@@ -417,12 +442,14 @@ void ViewerWindow::open() {
                                                    m_map ? "DS2 maps (*.ds2)" : "DS2MD models (*.ds2md)");
     if (!path.isEmpty())
         load(path);
+
     m_view->setFocus();
 }
 void ViewerWindow::exportModelGlb() {
     const auto scene = m_view->scene();
     if (!scene || m_map)
         return;
+
     m_view->releaseMouseCapture();
     const QFileInfo source(scene->path);
     QString path = QFileDialog::getSaveFileName(
@@ -430,8 +457,10 @@ void ViewerWindow::exportModelGlb() {
         source.absoluteDir().filePath(source.completeBaseName() + ".glb"), "Binary glTF (*.glb)");
     if (path.isEmpty())
         return;
+
     if (QFileInfo(path).suffix().isEmpty())
         path += ".glb";
+
     QStringList warnings;
     QApplication::setOverrideCursor(Qt::WaitCursor);
     try {
@@ -444,6 +473,7 @@ void ViewerWindow::exportModelGlb() {
         m_view->setFocus();
         return;
     }
+
     QApplication::restoreOverrideCursor();
     statusBar()->showMessage(
         QString("Exported %1%2").arg(path, warnings.isEmpty() ? QString()
@@ -452,11 +482,13 @@ void ViewerWindow::exportModelGlb() {
     if (!warnings.isEmpty()) {
         for (const auto &warning : warnings)
             qWarning().noquote() << warning;
+
         QMessageBox message(QMessageBox::Warning, "GLB exported with warnings",
                             "Saved " + path + "\n\n" + warnings.first(), QMessageBox::Ok, this);
         message.setDetailedText(warnings.join('\n'));
         message.exec();
     }
+
     m_view->setFocus();
 }
 void ViewerWindow::selectClip(int index) {
@@ -482,10 +514,13 @@ void ViewerWindow::play() {
         if (a->clipIndex() < 0) {
             if (a->clipCount())
                 selectClip(0);
+
             return;
         }
+
         if (!a->playing && a->time() >= a->duration())
             seek(0);
+
         a->playing = !a->playing;
         sync();
     }
@@ -507,6 +542,7 @@ void ViewerWindow::sync() {
         QSignalBlocker b(m_fly);
         m_fly->setChecked(m_view->camera.fly);
     }
+
     m_stats->setText(scene ? QString("%1 | %2/%3 meshes | %4 FPS%5")
                                  .arg(scene->version)
                                  .arg(m_view->visibleCount)
@@ -528,6 +564,7 @@ void ViewerWindow::sync() {
         m_timeline->setEnabled(animated && a->clipIndex() >= 0);
         if (!a)
             return;
+
         {
             QSignalBlocker b(m_clips);
             m_clips->setCurrentIndex(a->clipIndex() + 1);

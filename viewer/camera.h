@@ -46,6 +46,7 @@ class Camera {
             flyEye = eye();
         else if (fly && !enabled)
             target = flyEye + forward() * distance;
+
         fly = enabled;
     }
     void drag(float dx, float dy, Qt::MouseButtons buttons, Qt::KeyboardModifiers mods, int height) {
@@ -88,12 +89,14 @@ class Camera {
     bool move(const QSet<int> &keys, float dt) {
         if (!map || !fly)
             return false;
+
         const auto f = forward(), right = QVector3D::crossProduct(f, {0, 0, 1}).normalized();
         const auto m = f * float(keys.contains(Qt::Key_W) - keys.contains(Qt::Key_S)) +
                        right * float(keys.contains(Qt::Key_D) - keys.contains(Qt::Key_A)) +
                        QVector3D(0, 0, keys.contains(Qt::Key_E) - keys.contains(Qt::Key_Q));
         if (m.lengthSquared() == 0)
             return false;
+
         flyEye += m.normalized() * speed * std::min(dt, .1f) * (keys.contains(Qt::Key_Shift) ? 5.f : 1.f);
         return true;
     }
@@ -109,6 +112,7 @@ class Camera {
             far = std::min(far, drawDistance);
             near = std::min(near, far - .5f);
         }
+
         return {near, far};
     }
     QMatrix4x4 clip(const Bounds &bounds, float aspect, bool zeroToOne = false) const {
@@ -124,6 +128,7 @@ class Camera {
             projection(3, 2) = -1;
         } else
             projection.perspective(45.f, aspect, n, f);
+
         QMatrix4x4 view;
         view.lookAt(eye(), eye() + forward(), {0, 0, 1});
         return projection * view;

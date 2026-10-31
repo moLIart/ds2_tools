@@ -33,10 +33,12 @@ int main(int argc, char **argv) {
         parser.addOption({"mode", "combined, albedo, lightmap, colors, or meshes", "mode", "combined"});
     else
         parser.addOption({"export-glb", "Export the model and all animation clips to GLB and exit", "file"});
+
     parser.process(app);
     const auto args = parser.positionalArguments();
     if (args.size() > 1)
         parser.showHelp(1);
+
     const auto path = args.isEmpty() ? QString() : args.first();
     const QStringList modes = {"combined", "albedo", "lightmap", "colors", "meshes"};
     const int mode = map ? modes.indexOf(parser.value("mode")) : 0;
@@ -44,21 +46,25 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "Invalid render mode\n");
         return 1;
     }
+
     if (!map && path.isEmpty() && parser.isSet("screenshot")) {
         std::fprintf(stderr, "A model path is required for --screenshot\n");
         return 1;
     }
+
     if (!map && parser.isSet("export-glb")) {
         if (path.isEmpty() || parser.isSet("screenshot")) {
             std::fprintf(stderr, "--export-glb requires a model path and cannot be combined with --screenshot\n");
             return 1;
         }
+
         try {
             const auto scene = ds2::loadModel(path, ds2::findGameRoot(path, parser.value("game-root")));
             const QString destination = parser.value("export-glb");
             const auto warnings = ds2::exportGlb(scene, destination);
             for (const auto &warning : warnings)
                 std::fprintf(stderr, "Warning: %s\n", warning.toUtf8().constData());
+
             std::printf("Saved %s\n", destination.toUtf8().constData());
             return 0;
         } catch (const std::exception &e) {
@@ -66,6 +72,7 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+
     ds2::ViewerWindow window(map, ds2::findGameRoot(path, parser.value("game-root")), path, mode,
                              parser.value("screenshot"), parser.isSet("debug-rhi"));
     window.show();

@@ -88,8 +88,10 @@ struct RenderWidget::Data {
         const QString fallback = scene->map ? "$missing$" : "$white$";
         if (missingTextures.contains(path))
             return textures.at(fallback).texture.get();
+
         if (auto it = textures.find(path); it != textures.end())
             return it->second.texture.get();
+
         try {
             auto t = loadTexture(rhi, batch, path);
             auto *p = t.texture.get();
@@ -98,6 +100,7 @@ struct RenderWidget::Data {
         } catch (const std::exception &e) {
             if (path.startsWith('$'))
                 throw;
+
             scene->warnings.append(QString("%1: %2").arg(path, QString::fromUtf8(e.what())));
             auto *result = texture(rhi, batch, fallback);
             missingTextures.insert(path);
@@ -112,6 +115,7 @@ struct RenderWidget::Data {
         const auto key = m.albedo + '\n' + m.lightmap + (m.clamp ? "\nC" : "\nR");
         if (auto it = bindings.find(key); it != bindings.end())
             return it->second.get();
+
         auto s = std::unique_ptr<QRhiShaderResourceBindings>(rhi->newShaderResourceBindings());
         using B = QRhiShaderResourceBinding;
         s->setBindings({B::uniformBuffer(0, B::VertexStage | B::FragmentStage, frame.get()),
@@ -136,6 +140,7 @@ struct RenderWidget::Data {
             QMatrix4x4 m;
             std::memcpy(paletteBytes.data(), m.constData(), 64);
         }
+
         batch->uploadTexture(palette.get(),
                              {{0, 0,
                                QRhiTextureSubresourceUploadDescription(
@@ -151,6 +156,7 @@ struct RenderWidget::Data {
         const auto key = pipelineKey(m, wire, solid, grid);
         if (auto it = pipelines.find(key); it != pipelines.end())
             return it->second.get();
+
         auto p = std::unique_ptr<QRhiGraphicsPipeline>(rhi->newGraphicsPipeline());
         p->setShaderStages({{QRhiShaderStage::Vertex, vert}, {QRhiShaderStage::Fragment, frag}});
         QRhiVertexInputLayout layout;
@@ -175,10 +181,12 @@ struct RenderWidget::Data {
             p->setDepthBias(1);
             p->setSlopeScaledDepthBias(1);
         }
+
         if (wire && !grid) {
             require(rhi->isFeatureSupported(QRhi::NonFillPolygonMode), "Backend does not support wireframe");
             p->setPolygonMode(QRhiGraphicsPipeline::Line);
         }
+
         QRhiGraphicsPipeline::TargetBlend blend;
         blend.enable = !solid && !unblended && m.blend != Blend::None;
         if (m.blend == Blend::Alpha) {
@@ -195,6 +203,7 @@ struct RenderWidget::Data {
             blend.srcColor = blend.srcAlpha = QRhiGraphicsPipeline::One;
             blend.dstColor = blend.dstAlpha = QRhiGraphicsPipeline::Zero;
         }
+
         p->setTargetBlends({blend});
         require(p->create(), "Cannot create graphics pipeline");
         auto *result = p.get();
@@ -213,6 +222,7 @@ RenderWidget::RenderWidget(bool map, QWidget *parent) : QRhiWidget(parent), came
     if (m_map)
         setAttribute(Qt::WA_NativeWindow);
 #endif
+
     m_clock.start();
     m_fpsClock.start();
     auto *timer = new QTimer(this);
@@ -247,17 +257,20 @@ void RenderWidget::setScene(std::shared_ptr<Scene> scene) {
 Bounds RenderWidget::bounds(bool grid) const {
     if (!m_scene)
         return {};
+
     auto b = m_poseBounds;
     if (grid && m_data && showGrid && !m_map)
         for (int i = 0; i < 3; ++i) {
             b.low[i] = std::min(b.low[i], m_data->gridBounds.low[i]);
             b.high[i] = std::max(b.high[i], m_data->gridBounds.high[i]);
         }
+
     return b;
 }
 void RenderWidget::fit() {
     if (m_scene)
         camera.fit(bounds(), float(width()) / std::max(height(), 1));
+
     update();
     if (changed)
         changed();
@@ -268,6 +281,7 @@ void RenderWidget::poseChanged() {
         m_poseBounds = m_scene->animation ? m_scene->animation->bounds() : m_scene->bounds;
         camera.radius = std::max((m_poseBounds.high - m_poseBounds.low).length() * .5f, .001f);
     }
+
     update();
 }
 void RenderWidget::releaseResources() {
@@ -283,12 +297,15 @@ void RenderWidget::initialize(QRhiCommandBuffer *) {
             releaseResources();
             m_owner = rhi();
         }
+
         if (m_map)
             require(rhi()->supportedSampleCounts().contains(4), "Map viewer requires 4x MSAA");
+
         const QSize size = resolveTexture() ? resolveTexture()->pixelSize() : colorTexture()->pixelSize();
         if (!m_target || m_target->depth->pixelSize() != size) {
             if (m_data)
                 m_data->pipelines.clear();
+
             m_target.reset();
             auto t = std::make_unique<Target>();
             require(rhi()->isTextureFormatSupported(QRhiTexture::D32F, QRhiTexture::RenderTarget),
@@ -300,6 +317,7 @@ void RenderWidget::initialize(QRhiCommandBuffer *) {
                                                           : QRhiColorAttachment(colorTexture());
             if (resolveTexture())
                 color.setResolveTexture(resolveTexture());
+
             QRhiTextureRenderTargetDescription desc;
             desc.setColorAttachments({color});
             desc.setDepthTexture(t->depth.get());
@@ -319,6 +337,7 @@ void RenderWidget::initialize(QRhiCommandBuffer *) {
 void RenderWidget::render(QRhiCommandBuffer *cb) {
     if (!m_target)
         return;
+
     if (m_pending) {
         auto *batch = rhi()->nextResourceUpdateBatch();
         try {
@@ -347,6 +366,7 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                 influences[i * 4] = d->scene->influences[i].x();
                 influences[i * 4 + 1] = d->scene->influences[i].y();
             }
+
             d->influences.reset(rhi()->newTexture(QRhiTexture::RGBA32F, influenceSize));
             require(d->influences->create(), "Cannot create influence texture");
             batch->uploadTexture(d->influences.get(),
@@ -365,8 +385,10 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                 offsets.append(quint32(vertexBytes));
                 vertexBytes += g.vertices.size() * sizeof(Vertex);
             }
+
             for (const auto &m : d->scene->meshes)
                 indexBytes += m.indices.size() * 4;
+
             QVector<Vertex> grid;
             if (!m_map) {
                 const auto b = d->scene->animation ? d->scene->animation->bounds() : d->scene->bounds;
@@ -389,10 +411,12 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                     add(center.x() + p, center.y() - extent);
                     add(center.x() + p, center.y() + extent);
                 }
+
                 d->gridVertexOffset = quint32(vertexBytes);
                 d->gridVertexCount = grid.size();
                 vertexBytes += grid.size() * sizeof(Vertex);
             }
+
             require(vertexBytes > 0 && vertexBytes <= std::numeric_limits<quint32>::max() &&
                         indexBytes <= std::numeric_limits<quint32>::max(),
                     "Scene exceeds GPU buffer limits");
@@ -408,9 +432,11 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                                               quint32(g.vertices.size() * sizeof(Vertex)),
                                               g.vertices.constData());
             }
+
             if (!grid.isEmpty())
                 batch->uploadStaticBuffer(d->vertices.get(), d->gridVertexOffset,
                                           quint32(grid.size() * sizeof(Vertex)), grid.constData());
+
             quint32 indexStart = 0;
             int modelDrawIndex = 0;
             QByteArray uniforms(d->stride * (d->scene->meshes.size() + 1), 0);
@@ -426,6 +452,7 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                 if (!m.indices.isEmpty())
                     batch->uploadStaticBuffer(d->indices.get(), indexStart * 4, quint32(m.indices.size() * 4),
                                               m.indices.constData());
+
                 indexStart += m.indices.size();
                 DrawUniform u{};
                 std::memcpy(u.model, m.transform.constData(), 64);
@@ -441,8 +468,10 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                                                     {.74f, .70f, .75f}};
                     std::copy_n(palette[modelDrawIndex % 5], 3, u.tintGain);
                 }
+
                 if (!m.indices.isEmpty())
                     ++modelDrawIndex;
+
                 const uint32_t rgb = (uint32_t(i) * 0x9E3779 + 0x4F9CFF) & 0xFFFFFF;
                 u.meshCutoff[0] = (rgb >> 16) / 255.f;
                 u.meshCutoff[1] = ((rgb >> 8) & 255) / 255.f;
@@ -455,6 +484,7 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                 u.flags[3] = d->lastMip(mat.lightmap);
                 std::memcpy(uniforms.data() + i * d->stride, &u, sizeof(u));
             }
+
             if (!m_map) {
                 Material mat;
                 mat.albedo = "$white$";
@@ -468,15 +498,18 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                 u.flags[1] = 1;
                 std::memcpy(uniforms.data() + d->scene->meshes.size() * d->stride, &u, sizeof(u));
             }
+
             batch->updateDynamicBuffer(d->draw.get(), 0, uniforms);
             d->unblended = m_map && mode != 0;
             for (const auto &mesh : d->scene->meshes)
                 d->pipeline(rhi(), m_target->pass.get(), mesh.material, wireframe, m_map && mode == 4, false,
                             sampleCount());
+
             if (!m_map) {
                 Material gridMaterial;
                 d->pipeline(rhi(), m_target->pass.get(), gridMaterial, false, false, true, sampleCount());
             }
+
             cb->resourceUpdate(batch);
             batch = nullptr;
             m_data = std::move(d);
@@ -491,11 +524,13 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
         } catch (const std::exception &e) {
             if (batch)
                 batch->release();
+
             m_pending.reset();
             if (failed)
                 failed(QString::fromUtf8(e.what()));
         }
     }
+
     auto *batch = rhi()->nextResourceUpdateBatch();
     try {
         if (m_data) {
@@ -515,45 +550,56 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                 d.uploadPalette(batch);
                 m_paletteDirty = false;
             }
+
             if (m_map)
                 visibleMeshes(*m_scene, camera.clip(b, aspect, true), d.order);
             else {
                 d.order.resize(d.meshes.size());
                 std::iota(d.order.begin(), d.order.end(), 0);
             }
+
             visibleCount = d.order.size();
             const auto eye = camera.eye();
             if (m_map) {
                 for (int i : d.order)
                     d.sortDistances[i] = (d.meshes[i].center - eye).lengthSquared();
+
                 std::sort(d.order.begin(), d.order.end(), [&](int a, int b) {
                     const auto &ma = m_scene->meshes[a], &mb = m_scene->meshes[b];
                     const auto &x = ma.material, &y = mb.material;
                     const bool ta = x.blend != Blend::None, tb = y.blend != Blend::None;
                     if (ta != tb)
                         return !ta;
+
                     if (x.sort != y.sort)
                         return x.sort < y.sort;
+
                     const float da = d.sortDistances[a], db = d.sortDistances[b];
                     if (da != db)
                         return ta ? da > db : da < db;
+
                     if (!ta && x.name != y.name)
                         return x.name < y.name;
+
                     if (!ta && ma.sortGeometry != mb.sortGeometry)
                         return ma.sortGeometry < mb.sortGeometry;
+
                     return a < b;
                 });
             }
+
             const bool solid = m_map && mode == 4;
             d.unblended = m_map && mode != 0;
             for (int i : d.order)
                 d.pipeline(rhi(), m_target->pass.get(), m_scene->meshes[i].material, wireframe, solid, false,
                            sampleCount());
+
             if (!m_map && showGrid) {
                 Material mat;
                 d.pipeline(rhi(), m_target->pass.get(), mat, false, false, true, sampleCount());
             }
         }
+
         cb->beginPass(m_target->rt.get(),
                       m_map ? QColor::fromRgbF(.055f, .07f, .09f, 1.f)
                             : QColor::fromRgbF(.075f, .09f, .115f, 1.f),
@@ -572,12 +618,14 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                     cb->setGraphicsPipeline(p);
                     last = p;
                 }
+
                 const QRhiCommandBuffer::DynamicOffset offset(1, quint32(i * d.stride));
                 cb->setShaderResources(g.bindings, 1, &offset);
                 const QRhiCommandBuffer::VertexInput input(d.vertices.get(), g.vertexOffset);
                 cb->setVertexInput(0, 1, &input, d.indices.get(), 0, QRhiCommandBuffer::IndexUInt32);
                 cb->drawIndexed(g.indexCount, 1, g.indexStart);
             }
+
             if (!m_map && showGrid) {
                 Material mat;
                 cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(mat, false, false, true)).get());
@@ -588,10 +636,12 @@ void RenderWidget::render(QRhiCommandBuffer *cb) {
                 cb->draw(d.gridVertexCount);
             }
         }
+
         cb->endPass();
     } catch (const std::exception &e) {
         if (batch)
             batch->release();
+
         if (failed)
             failed(QString::fromUtf8(e.what()));
     }
@@ -602,6 +652,7 @@ void RenderWidget::tick() {
     m_lastTick = now;
     if (!isVisible() || !m_scene)
         return;
+
     bool dirty = camera.move(m_keys, float(dt));
     if (m_scene->animation) {
         try {
@@ -615,6 +666,7 @@ void RenderWidget::tick() {
                 failed(QString::fromUtf8(e.what()));
         }
     }
+
     if (m_map || dirty)
         update();
 }
@@ -622,6 +674,7 @@ void RenderWidget::releaseMouseCapture() {
     m_buttons = {};
     if (!m_mouseCaptured)
         return;
+
     m_mouseCaptured = false;
 #ifdef Q_OS_WIN
     ClipCursor(nullptr);
@@ -631,11 +684,13 @@ void RenderWidget::releaseMouseCapture() {
     unsetCursor();
     if (QWidget::mouseGrabber() == this)
         releaseMouse();
+
     QCursor::setPos(m_restoreCursor);
 }
 void RenderWidget::mousePressEvent(QMouseEvent *e) {
     if (!m_scene || !(e->button() & (Qt::LeftButton | Qt::MiddleButton | Qt::RightButton)))
         return;
+
 #ifdef Q_OS_WIN
     // Resolve the handle before grabMouse(), never while a grab is active.
     const auto hwnd = m_map ? reinterpret_cast<HWND>(winId()) : nullptr;
@@ -652,6 +707,7 @@ void RenderWidget::mousePressEvent(QMouseEvent *e) {
             grabMouse();
             if (!m_mouseCaptured)
                 return;
+
 #ifdef Q_OS_WIN
             RAWINPUTDEVICE dev{0x01, 0x02, 0, hwnd};
             RegisterRawInputDevices(&dev, 1, sizeof(dev));
@@ -664,6 +720,7 @@ void RenderWidget::mousePressEvent(QMouseEvent *e) {
 #endif
         }
     }
+
     if (m_map && e->button() == Qt::RightButton)
         camera.setFly(true);
 }
@@ -675,6 +732,7 @@ void RenderWidget::mouseReleaseEvent(QMouseEvent *e) {
 void RenderWidget::applyMouseDelta(float dx, float dy, Qt::KeyboardModifiers mods) {
     if (!m_buttons)
         return;
+
     camera.drag(dx, dy, m_buttons, mods, height());
     update();
     if (changed)
@@ -685,6 +743,7 @@ void RenderWidget::mouseMoveEvent(QMouseEvent *e) {
     if (m_map && m_buttons)
         return;
 #endif
+
     const auto delta = e->position() - m_last;
     m_last = e->position();
     applyMouseDelta(delta.x(), delta.y(), e->modifiers());
@@ -696,17 +755,20 @@ void RenderWidget::wheelEvent(QWheelEvent *e) {
         if (changed)
             changed();
     }
+
     e->accept();
 }
 void RenderWidget::keyPressEvent(QKeyEvent *e) {
     m_keys.insert(e->key());
     if (!e->isAutoRepeat() && keyAction)
         keyAction(e->key(), e->modifiers());
+
     e->accept();
 }
 void RenderWidget::keyReleaseEvent(QKeyEvent *e) {
     if (!e->isAutoRepeat())
         m_keys.remove(e->key());
+
     e->accept();
 }
 void RenderWidget::focusOutEvent(QFocusEvent *e) {
@@ -720,6 +782,7 @@ bool RenderWidget::event(QEvent *e) {
         m_keys.clear();
         releaseMouseCapture();
     }
+
     return QRhiWidget::event(e);
 }
 bool RenderWidget::nativeEvent(const QByteArray &type, void *message, qintptr *result) {
@@ -727,6 +790,7 @@ bool RenderWidget::nativeEvent(const QByteArray &type, void *message, qintptr *r
     const auto *msg = static_cast<MSG *>(message);
     if (m_mouseCaptured && (msg->message == WM_CAPTURECHANGED || msg->message == WM_CANCELMODE))
         releaseMouseCapture();
+
     if (msg->message == WM_INPUT && m_map && m_mouseCaptured && m_buttons) {
         RAWINPUT input{};
         UINT size = sizeof(input);
@@ -737,6 +801,7 @@ bool RenderWidget::nativeEvent(const QByteArray &type, void *message, qintptr *r
                             QApplication::keyboardModifiers());
     }
 #endif
+
     return QRhiWidget::nativeEvent(type, message, result);
 }
 void RenderWidget::dragEnterEvent(QDragEnterEvent *e) {
@@ -747,15 +812,18 @@ void RenderWidget::dropEvent(QDropEvent *e) {
     const auto urls = e->mimeData()->urls();
     if (urls.isEmpty())
         return;
+
     QString path = urls.first().toLocalFile();
     for (const auto &u : urls)
         if (u.toLocalFile().endsWith(m_map ? ".ds2" : ".ds2md", Qt::CaseInsensitive)) {
             path = u.toLocalFile();
             break;
         }
+
     releaseMouseCapture();
     if (fileDropped)
         fileDropped(path);
+
     e->acceptProposedAction();
 }
 } // namespace ds2

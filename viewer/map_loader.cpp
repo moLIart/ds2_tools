@@ -39,6 +39,7 @@ QString decode1251(const char *data, qsizetype size) {
         const auto c = static_cast<unsigned char>(data[i]);
         text[i] = QChar(c < 128 ? char16_t(c) : c < 192 ? upper[c - 128] : char16_t(0x0410 + c - 192));
     }
+
     return text;
 }
 
@@ -50,6 +51,7 @@ class Reader {
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly))
             fail(QString("Cannot open %1: %2").arg(path, file.errorString()));
+
         data = file.readAll();
         if (file.error() != QFileDevice::NoError)
             fail(QString("Cannot read %1: %2").arg(path, file.errorString()));
@@ -60,6 +62,7 @@ class Reader {
                      .arg(pos, 0, 16)
                      .arg(size)
                      .arg(data.size()));
+
         const quint64 start = pos;
         pos += size;
         return start;
@@ -107,6 +110,7 @@ class Reader {
         const uint32_t n = integer();
         if (n > (quint64(data.size()) - pos) / minimum || n > uint32_t(std::numeric_limits<int>::max()))
             fail(QString("Impossible count %1 at 0x%2").arg(n).arg(pos - 4, 0, 16));
+
         return n;
     }
 };
@@ -141,6 +145,7 @@ bool finiteBounds(const Bounds &bounds) {
     for (int i = 0; i < 3; ++i)
         if (!std::isfinite(bounds.low[i]) || !std::isfinite(bounds.high[i]))
             return false;
+
     return true;
 }
 
@@ -149,6 +154,7 @@ ParsedMap parse(Reader &r) {
     const auto version = r.string();
     if (version != "0.8")
         fail(QString("Unsupported DS2 geometry version '%1'").arg(version));
+
     ParsedMap out;
     QSet<QString> seen;
     while (r.pos < quint64(r.data.size())) {
@@ -157,6 +163,7 @@ ParsedMap parse(Reader &r) {
         const QString name = r.string();
         if (seen.contains(name))
             fail(QString("Duplicate chunk '%1' at 0x%2").arg(name).arg(chunkOffset, 0, 16));
+
         seen.insert(name);
         if (name == "meshes") {
             const auto count = r.count(270);
@@ -168,6 +175,7 @@ ParsedMap parse(Reader &r) {
                 mesh.material = r.string();
                 for (auto &texture : mesh.textures)
                     texture = r.string();
+
                 mesh.bounds = r.bounds();
                 r.take(16 + 156 + 1 + 12); // Sphere, auxiliary bounds, flag_114, vector_118.
                 mesh.lightmap = r.integer();
@@ -189,10 +197,12 @@ ParsedMap parse(Reader &r) {
                                      .arg(i)
                                      .arg(mesh.offset, 0, 16));
                     }
+
                     mesh.matrix =
                         QMatrix4x4(matrix); // File rows; Qt constructor converts to column-major storage.
                     r.take(8);              // Advisory model group/instance references are not authoritative.
                 }
+
                 out.meshes.append(std::move(mesh));
             }
         } else if (name == "buffers") {
@@ -206,6 +216,7 @@ ParsedMap parse(Reader &r) {
                     fail(QString("Unknown buffer flags 0x%1 at 0x%2")
                              .arg(buffer.flags, 0, 16)
                              .arg(buffer.offset, 0, 16));
+
                 buffer.count = r.integer();
                 const quint64 n = buffer.count;
                 if (buffer.flags & 1) {
@@ -213,19 +224,26 @@ ParsedMap parse(Reader &r) {
                 } else {
                     if (buffer.flags & 2)
                         buffer.positions = r.take(n * 12);
+
                     if (buffer.flags & 8)
                         buffer.uv = r.take(n * 8);
+
                     if (buffer.flags & 16)
                         buffer.lightUv = r.take(n * 8);
+
                     if (buffer.flags & 32)
                         buffer.colors = r.take(n * 16);
+
                     if (buffer.flags & 4)
                         r.take(n * 12);
+
                     if (buffer.flags & 64)
                         r.take(n * 12);
+
                     if (buffer.flags & 128)
                         r.take(n * 12);
                 }
+
                 out.buffers.append(buffer);
             }
         } else if (name == "lightmaps") {
@@ -248,6 +266,7 @@ ParsedMap parse(Reader &r) {
                         const auto id = r.integer();
                         if (id > uint32_t(std::numeric_limits<int>::max()))
                             fail(QString("Vistree mesh %1 outside mesh table").arg(id));
+
                         node.meshes.append(int(id));
                     }
                 } else {
@@ -256,11 +275,14 @@ ParsedMap parse(Reader &r) {
                         const auto id = r.integer();
                         if (id == absent)
                             continue;
+
                         if (id > uint32_t(std::numeric_limits<int>::max()))
                             fail(QString("Vistree child %1 outside node table").arg(id));
+
                         node.children.append(int(id));
                     }
                 }
+
                 out.nodes.append(std::move(node));
             }
         } else if (name == "lights") {
@@ -280,10 +302,13 @@ ParsedMap parse(Reader &r) {
                      .arg(name)
                      .arg(chunkOffset, 0, 16));
         }
+
         r.expect("DS2Chunk_end");
     }
+
     if (!seen.contains("meshes") || !seen.contains("buffers") || !seen.contains("lightmaps"))
         fail("Missing geometry, buffers or lightmaps chunk");
+
     return out;
 }
 
@@ -299,6 +324,7 @@ std::map<Binding, BindingInfo> validate(const ParsedMap &map, const Reader &r) {
              {std::pair{buffer.positions, 3u}, std::pair{buffer.uv, 2u}, std::pair{buffer.lightUv, 2u}}) {
             if (!attribute.first)
                 continue;
+
             const QString name = attribute.first == buffer.positions ? "positions"
                                  : attribute.first == buffer.uv      ? "uv"
                                                                      : "lightmap_uv";
@@ -312,6 +338,7 @@ std::map<Binding, BindingInfo> validate(const ParsedMap &map, const Reader &r) {
             }
         }
     }
+
     std::map<Binding, BindingInfo> bindings;
     for (qsizetype number = 0; number < map.meshes.size(); ++number) {
         const auto &mesh = map.meshes[number];
@@ -320,43 +347,57 @@ std::map<Binding, BindingInfo> validate(const ParsedMap &map, const Reader &r) {
         };
         if (!finiteBounds(mesh.bounds))
             meshFail("non-finite bounds");
+
         if (mesh.vertexBuffer >= map.buffers.size())
             meshFail("vertex_buffer outside buffers");
+
         const auto &vb = map.buffers[mesh.vertexBuffer];
         if (!vb.positions)
             meshFail("vertex buffer has no positions");
+
         if (quint64(mesh.vertexStart) + mesh.vertexCount > vb.count)
             meshFail("vertex range outside buffer");
+
         if (mesh.lightmap != absent && mesh.lightmap >= map.lightmaps.size())
             meshFail("lightmap index outside table");
+
         uint32_t required = mesh.vertexCount;
         for (const auto &range : {mesh.list, mesh.strip}) {
             if (!range.count)
                 continue;
+
             if (range.buffer >= map.buffers.size() || !map.buffers[range.buffer].indices)
                 meshFail("index_buffer outside index buffers");
+
             const auto &ib = map.buffers[range.buffer];
             if (quint64(range.start) + range.count > ib.count)
                 meshFail("index range outside buffer");
+
             for (quint64 i = 0; i < range.count; ++i) {
                 const auto index = r.atU32(ib.indices + (quint64(range.start) + i) * 4);
                 if (quint64(index) + mesh.vertexStart >= vb.count)
                     meshFail("index plus vertex base outside vertex buffer");
+
                 required = std::max(required, index + 1);
             }
         }
+
         const uint32_t colorBuffer = mesh.colorBuffer == absent ? mesh.vertexBuffer : mesh.colorBuffer;
         const uint32_t colorStart = mesh.colorBuffer == absent ? mesh.vertexStart : mesh.colorStart;
         if (colorBuffer >= map.buffers.size())
             meshFail("instance color buffer outside buffer table");
+
         const auto &colors = map.buffers[colorBuffer];
         if (mesh.colorBuffer != absent && !colors.colors)
             meshFail("instance color buffer has no colors");
+
         if (colors.colors && quint64(colorStart) + required > colors.count)
             meshFail("instance color range outside color buffer");
+
         auto &binding = bindings[{mesh.vertexBuffer, mesh.vertexStart, colorBuffer, colorStart}];
         binding.count = std::max(binding.count, required);
     }
+
     if (!map.nodes.isEmpty()) {
         QVector<uint8_t> visited(map.nodes.size(), 0), covered(map.meshes.size(), 0);
         QVector<int> pending{0};
@@ -365,32 +406,41 @@ std::map<Binding, BindingInfo> validate(const ParsedMap &map, const Reader &r) {
             const int id = pending.takeLast();
             if (id < 0 || id >= map.nodes.size())
                 fail(QString("Vistree child %1 outside node table").arg(id));
+
             if (visited[id])
                 fail(QString("Vistree node %1 has a cycle or multiple parents").arg(id));
+
             visited[id] = 1;
             ++visitedCount;
             const auto &node = map.nodes[id];
             bool valid = finiteBounds(node.bounds);
             for (int axis = 0; axis < 3; ++axis)
                 valid = valid && node.bounds.low[axis] <= node.bounds.high[axis];
+
             if (!valid)
                 fail(QString("Vistree node %1 has invalid bounds").arg(id));
+
             for (const auto child : node.children)
                 pending.append(child);
+
             for (const auto mesh : node.meshes) {
                 if (mesh < 0 || mesh >= map.meshes.size())
                     fail(QString("Vistree mesh %1 outside mesh table").arg(mesh));
+
                 if (!covered[mesh]) {
                     covered[mesh] = 1;
                     ++coveredCount;
                 }
             }
         }
+
         if (visitedCount != map.nodes.size())
             fail("Vistree contains nodes unreachable from root 0");
+
         if (coveredCount != map.meshes.size())
             fail("Vistree does not cover every mesh");
     }
+
     return bindings;
 }
 
@@ -421,15 +471,19 @@ Fields fields(const QStringList &tokens, qsizetype start, qsizetype end) {
             }
         } else
             group.append(value);
+
         result.insert(name, group);
     }
+
     return result;
 }
 QString unquote(QString text) {
     while (text.startsWith('"'))
         text.remove(0, 1);
+
     while (text.endsWith('"'))
         text.chop(1);
+
     return text;
 }
 float materialFloat(const QString &text, const QString &path) {
@@ -437,6 +491,7 @@ float materialFloat(const QString &text, const QString &path) {
     const float value = text.toFloat(&ok);
     if (!ok || !std::isfinite(value))
         fail(QString("Invalid material number '%1' in %2").arg(text, path));
+
     return value;
 }
 QHash<QString, Declaration> readMaterials(const QString &directory) {
@@ -449,21 +504,25 @@ QHash<QString, Declaration> readMaterials(const QString &directory) {
         QFile file(path.absoluteFilePath());
         if (!file.open(QIODevice::ReadOnly))
             fail(QString("Cannot read material %1: %2").arg(path.absoluteFilePath(), file.errorString()));
+
         const auto bytes = file.readAll();
         if (file.error() != QFileDevice::NoError)
             fail(QString("Cannot read material %1: %2").arg(path.absoluteFilePath(), file.errorString()));
+
         QString text = decode1251(bytes.constData(), bytes.size());
         text.remove(comments);
         QStringList tokens;
         auto matches = tokenizer.globalMatch(text);
         while (matches.hasNext())
             tokens.append(matches.next().captured());
+
         qsizetype i = 0;
         while (i + 2 < tokens.size()) {
             if (tokens[i].toCaseFolded() != "template_material" || tokens[i + 2] != "{") {
                 ++i;
                 continue;
             }
+
             Declaration d;
             d.name = tokens[i + 1];
             i += 3;
@@ -473,13 +532,16 @@ QHash<QString, Declaration> readMaterials(const QString &directory) {
                 const auto &token = tokens[i++];
                 depth += (token == "{") - (token == "}");
             }
+
             const auto f = fields(tokens, start, i - 1);
             const auto scalar = [&](const QString &key, const QString &fallback = QString()) {
                 const auto it = f.constFind(key);
                 if (it == f.cend())
                     return fallback;
+
                 if (it->isEmpty())
                     fail(QString("Empty material field '%1' in %2").arg(key, path.absoluteFilePath()));
+
                 return unquote(it->first()).toCaseFolded();
             };
             d.shader = scalar("material", "unknown");
@@ -495,24 +557,29 @@ QHash<QString, Declaration> readMaterials(const QString &directory) {
             d.sort = scalar("sort_value", "5").toInt(&sortOk);
             if (!sortOk)
                 fail(QString("Invalid sort_value in %1").arg(path.absoluteFilePath()));
+
             const auto alpha = f.value("alphatest");
             if (alpha.size() >= 2 && alpha[0] == "greater")
                 d.alphaCutoff = materialFloat(alpha[1], path.absoluteFilePath());
+
             const auto color = f.value("color3", {"1", "1", "1"});
             if (color.size() < 3)
                 fail(QString("Incomplete color3 in %1").arg(path.absoluteFilePath()));
+
             d.color = {materialFloat(color[0], path.absoluteFilePath()),
                        materialFloat(color[1], path.absoluteFilePath()),
                        materialFloat(color[2], path.absoluteFilePath())};
             const auto diffuse = f.value("diffuse_texture", {"$white$"});
             if (diffuse.isEmpty())
                 fail(QString("Empty diffuse_texture in %1").arg(path.absoluteFilePath()));
+
             d.diffuse = unquote(diffuse[0]);
             d.clamp = diffuse.contains("clampmap");
             d.uvTransform = f.contains("diffuse_texture_transform");
             result.insert(d.name.toCaseFolded(), std::move(d));
         }
     }
+
     return result;
 }
 
@@ -529,6 +596,7 @@ class TextureIndex {
             if (extension == "dds" || extension == "tga")
                 paths.append(QFileInfo(path).absoluteFilePath());
         }
+
         std::sort(paths.begin(), paths.end());
         for (const auto &path : paths)
             images[QFileInfo(path).fileName().toCaseFolded()].append(path);
@@ -543,6 +611,7 @@ class TextureIndex {
             warnings.append(QString("No texture for '%1'").arg(reference));
             return "$missing$";
         }
+
         const auto stem = QFileInfo(name).completeBaseName();
         const QStringList names{(stem + ".dds").toCaseFolded(), (stem + ".tga").toCaseFolded()};
         for (const auto &candidate : names) {
@@ -550,12 +619,15 @@ class TextureIndex {
             if (found != siblings.cend() && found->size() == 1)
                 return found->first();
         }
+
         for (const auto &candidate : names) {
             const auto found = images.constFind(candidate);
             if (found == images.cend())
                 continue;
+
             if (found->size() == 1)
                 return found->first();
+
             QString exact;
             int exactCount = 0;
             if (parts.size() >= 2) {
@@ -567,12 +639,15 @@ class TextureIndex {
                     }
                 }
             }
+
             if (exactCount == 1)
                 return exact;
+
             warnings.append(
                 QString("Ambiguous local texture '%1': %2 candidates").arg(reference).arg(found->size()));
             return "$missing$";
         }
+
         warnings.append(QString("Missing local DDS/TGA for '%1'").arg(reference));
         return "$missing$";
     }
@@ -599,6 +674,7 @@ MapResources &resourcesFor(const QString &gameRoot) {
     auto found = resources.find(key);
     if (found == resources.end())
         found = resources.emplace(key, std::make_unique<MapResources>(root)).first;
+
     return *found->second;
 }
 
@@ -607,6 +683,7 @@ void appendIndices(QVector<uint32_t> &indices, const MapMesh &mesh, const Parsed
         quint64(mesh.list.count / 3) + (mesh.strip.count >= 3 ? quint64(mesh.strip.count) - 2 : 0);
     if (triangles * 3 > quint64(std::numeric_limits<int>::max()))
         fail("Expanded mesh index count is too large");
+
     indices.reserve(qsizetype(triangles * 3));
     if (mesh.list.count) {
         const auto offset = map.buffers[mesh.list.buffer].indices + quint64(mesh.list.start) * 4;
@@ -614,6 +691,7 @@ void appendIndices(QVector<uint32_t> &indices, const MapMesh &mesh, const Parsed
         for (quint64 i = 0; i < quint64(mesh.list.count / 3) * 3; ++i)
             indices.append(r.atU32(offset + i * 4));
     }
+
     if (mesh.strip.count >= 3) {
         const auto offset = map.buffers[mesh.strip.buffer].indices + quint64(mesh.strip.start) * 4;
         uint32_t a = r.atU32(offset), b = r.atU32(offset + 4);
@@ -641,6 +719,7 @@ bool inFrustum(const Bounds &bounds, const std::array<Plane, 6> &planes) {
         if (x + y + z + p.d < -tolerance)
             return false;
     }
+
     return true;
 }
 } // namespace
@@ -651,6 +730,7 @@ Scene loadMap(const QString &path, const QString &gameRoot) {
     auto bindings = validate(map, reader);
     if (map.meshes.isEmpty())
         fail("Map contains no geometry");
+
     Scene scene;
     scene.path = QFileInfo(path).absoluteFilePath();
     scene.name = QFileInfo(path).completeBaseName();
@@ -664,6 +744,7 @@ Scene loadMap(const QString &path, const QString &gameRoot) {
     QHash<QString, QStringList> nearby;
     for (const auto &image : QDir(QFileInfo(path).absolutePath()).entryInfoList(QDir::Files, QDir::Name))
         nearby[image.fileName().toCaseFolded()].append(image.absoluteFilePath());
+
     QHash<QString, QString> albedos;
     QStringList lightmaps;
     // Match Python warning order: mesh materials/albedos first, then lightmaps.
@@ -682,20 +763,24 @@ Scene loadMap(const QString &path, const QString &gameRoot) {
             materials.insert(materialName, fallback);
             declaration = materials.constFind(materialName);
         }
+
         const auto &d = *declaration;
         const QString reference = d.diffuse == "$diffuse$" ? source.textures[0] : d.diffuse;
         if (!albedos.contains(reference))
             albedos.insert(reference, reference == "$white$" || reference == "$black$"
                                           ? reference
                                           : textures.resolve(reference, nearby, scene.warnings));
+
         if (d.shader == "envmap" || d.shader == "embm" || d.shader == "space_distortion" ||
             d.shader == "flare" || materialName.contains("refl") || materialName.startsWith("cubeman"))
             scene.warnings.append(
                 QString("%1: static albedo/lighting only; reflection/distortion/flare effects not reproduced")
                     .arg(source.material));
+
         if (d.uvTransform)
             scene.warnings.append(
                 QString("%1: stored UVs shown without material UV animation/transform").arg(source.material));
+
         const uint32_t colorBuffer = source.colorBuffer == absent ? source.vertexBuffer : source.colorBuffer;
         const uint32_t colorStart = source.colorBuffer == absent ? source.vertexStart : source.colorStart;
         const Binding key{source.vertexBuffer, source.vertexStart, colorBuffer, colorStart};
@@ -711,12 +796,15 @@ Scene loadMap(const QString &path, const QString &gameRoot) {
                 const quint64 base = quint64(source.vertexStart) + vertex;
                 for (int component = 0; component < 3; ++component)
                     out.position[component] = reader.atFloat(vb.positions + base * 12 + component * 4);
+
                 for (int component = 0; component < 2; ++component) {
                     if (vb.uv)
                         out.uv[component] = reader.atFloat(vb.uv + base * 8 + component * 4);
+
                     if (vb.lightUv)
                         out.lightUv[component] = reader.atFloat(vb.lightUv + base * 8 + component * 4);
                 }
+
                 // The map shader never uses exported normals/tangents (unused vectors can be NaN).
                 if (cb.colors)
                     for (int component = 0; component < 4; ++component)
@@ -726,9 +814,11 @@ Scene loadMap(const QString &path, const QString &gameRoot) {
                                   255u) /
                             255.f;
             }
+
             binding.geometry = int(scene.geometries.size());
             scene.geometries.append(std::move(geometry));
         }
+
         Mesh mesh;
         mesh.name = QString("%1 [%2]").arg(source.material).arg(i);
         mesh.geometry = binding.geometry;
@@ -759,15 +849,18 @@ Scene loadMap(const QString &path, const QString &gameRoot) {
             m.blend = Blend::Modulate;
         else if (!d.blend.isEmpty())
             m.blend = Blend::Replace;
+
         scene.meshes.append(std::move(mesh));
         for (int axis = 0; axis < 3; ++axis) {
             scene.bounds.low[axis] = std::min(scene.bounds.low[axis], source.bounds.low[axis]);
             scene.bounds.high[axis] = std::max(scene.bounds.high[axis], source.bounds.high[axis]);
         }
     }
+
     lightmaps.reserve(map.lightmaps.size());
     for (const auto &reference : map.lightmaps)
         lightmaps.append(textures.resolve(reference, nearby, scene.warnings));
+
     for (qsizetype i = 0; i < map.meshes.size(); ++i) {
         const auto index = map.meshes[i].lightmap;
         if (index != absent) {
@@ -776,6 +869,7 @@ Scene loadMap(const QString &path, const QString &gameRoot) {
             material.flipLightmap = QFileInfo(material.lightmap).suffix().toCaseFolded() == "tga";
         }
     }
+
     scene.visibility = map.nodes;
     scene.warnings.removeDuplicates();
     return scene;
@@ -796,29 +890,36 @@ void visibleMeshes(const Scene &scene, const QMatrix4x4 &zeroToOneClip, QVector<
         for (qsizetype i = 0; i < scene.meshes.size(); ++i)
             if (inFrustum(scene.meshes[i].bounds, planes))
                 result.append(int(i));
+
         return;
     }
+
     // Calls are synchronous on the render thread; retain traversal scratch without shared scene mutation.
     thread_local QVector<int> pending;
     thread_local QVector<uint32_t> stamps;
     thread_local uint32_t generation = 0;
     if (stamps.size() < scene.meshes.size())
         stamps.resize(scene.meshes.size());
+
     if (++generation == 0) {
         std::fill(stamps.begin(), stamps.end(), 0);
         generation = 1;
     }
+
     pending.clear();
     pending.append(0);
     while (!pending.isEmpty()) {
         const auto &node = scene.visibility[pending.takeLast()];
         if (!inFrustum(node.bounds, planes))
             continue;
+
         for (const auto child : node.children)
             pending.append(child);
+
         for (const auto id : node.meshes) {
             if (stamps[id] == generation)
                 continue;
+
             stamps[id] = generation;
             // A leaf merely intersects this world AABB. Never transform it or inherit the leaf result.
             if (inFrustum(scene.meshes[id].bounds, planes))

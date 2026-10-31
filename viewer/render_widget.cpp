@@ -1,6 +1,7 @@
 #include "render_widget.h"
 #include "texture.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -14,6 +15,7 @@
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QQuaternion>
 #include <QTimer>
 #include <QWheelEvent>
 #include <rhi/qrhi.h>
@@ -59,6 +61,75 @@ namespace ds2 {
       const int w = int(std::min<qsizetype>(std::max<qsizetype>(1, count), 1024));
       return {w, int((std::max<qsizetype>(1, count) + w - 1) / w)};
     }
+
+    Material lightMaterial() {
+      Material m;
+      m.albedo     = "$white$";
+      m.blend      = Blend::Alpha;
+      m.cull       = true;
+      m.depthWrite = false;
+      return m;
+    }
+
+    void appendSphere(QVector<Vertex>& vertices, QVector<quint32>& indices) {
+      constexpr int segments = 16, rings = 8;
+      constexpr float pi     = 3.14159265358979323846f;
+      const quint32 base     = quint32(vertices.size());
+      vertices.reserve(vertices.size() + (rings + 1) * (segments + 1));
+      indices.reserve(indices.size() + rings * segments * 6);
+      for (int lat = 0; lat <= rings; ++lat) {
+        const float theta = pi * lat / rings;
+        const float z = std::cos(theta), radius = std::sin(theta);
+        for (int lon = 0; lon <= segments; ++lon) {
+          const float phi = 2 * pi * lon / segments;
+          Vertex v;
+          v.position[0] = radius * std::cos(phi);
+          v.position[1] = radius * std::sin(phi);
+          v.position[2] = z;
+          vertices.append(v);
+        }
+      }
+
+      for (int lat = 0; lat < rings; ++lat) {
+        for (int lon = 0; lon < segments; ++lon) {
+          const quint32 a = base + lat * (segments + 1) + lon, b = a + segments + 1;
+          indices.append(a);
+          indices.append(b);
+          indices.append(a + 1);
+          indices.append(a + 1);
+          indices.append(b);
+          indices.append(b + 1);
+        }
+      }
+    }
+
+    void appendCone(QVector<Vertex>& vertices, QVector<quint32>& indices) {
+      constexpr int segments = 16;
+      constexpr float pi = 3.14159265358979323846f, radius = .3f, height = 1.f;
+      const quint32 apex = 0;
+      Vertex v;
+      vertices.append(v);
+      for (int i = 0; i < segments; ++i) {
+        const float angle = 2 * pi * i / segments;
+        v.position[0] = radius * std::cos(angle);
+        v.position[1] = radius * std::sin(angle);
+        v.position[2] = height;
+        vertices.append(v);
+      }
+
+      const quint32 center = segments + 1;
+      v.position[0] = v.position[1] = 0;
+      vertices.append(v);
+      for (int i = 0; i < segments; ++i) {
+        const quint32 current = 1 + i, next = 1 + (i + 1) % segments;
+        indices.append(apex);
+        indices.append(next);
+        indices.append(current);
+        indices.append(center);
+        indices.append(next);
+        indices.append(current);
+      }
+    }
   } // namespace
 
   struct RenderWidget::Target {
@@ -82,15 +153,24 @@ namespace ds2 {
       QRhiShaderResourceBindings* bindings;
     };
 
+    struct LightGpu {
+      quint32 vertexOffset, indexStart, indexCount;
+    };
+
     QVector<MeshGpu> meshes;
     QVector<int> order;
     QVector<float> sortDistances;
+    QVector<LightGpu> lights;
+    QVector<int> lightOrder;
+    QVector<float> lightDistances;
     QVector<float> paletteBytes;
     int stride     = 0;
     bool unblended = false;
     QSet<QString> missingTextures;
     quint32 gridVertexOffset = 0, gridVertexCount = 0;
+    quint32 crossVertexOffset = 0, crossVertexCount = 0;
     QRhiShaderResourceBindings* gridBindings = nullptr;
+    QRhiShaderResourceBindings* lightBindings = nullptr;
     Bounds gridBounds;
     QShader vert, frag;
 
@@ -159,13 +239,13 @@ namespace ds2 {
       batch->uploadTexture(palette.get(), {{0, 0, QRhiTextureSubresourceUploadDescription(paletteBytes.constData(), quint32(paletteBytes.size() * sizeof(float)))}});
     }
 
-    uint32_t pipelineKey(const Material& m, bool wire, bool solid, bool grid) const {
+    uint32_t pipelineKey(const Material& m, bool wire, bool solid, bool grid, bool light = false) const {
       return uint32_t(m.cull) | uint32_t(m.depthTest || solid) << 1 | uint32_t(m.depthWrite || solid) << 2 | uint32_t(m.depthOffset) << 3 |
-             uint32_t(solid || unblended ? Blend::None : m.blend) << 4 | uint32_t(wire && !grid) << 8 | uint32_t(grid) << 9;
+             uint32_t(solid || (unblended && !light) ? Blend::None : m.blend) << 4 | uint32_t(wire && !grid) << 8 | uint32_t(grid) << 9 | uint32_t(light) << 10;
     }
 
-    QRhiGraphicsPipeline* pipeline(QRhi* rhi, QRhiRenderPassDescriptor* pass, const Material& m, bool wire, bool solid, bool grid, int samples) {
-      const auto key = pipelineKey(m, wire, solid, grid);
+    QRhiGraphicsPipeline* pipeline(QRhi* rhi, QRhiRenderPassDescriptor* pass, const Material& m, bool wire, bool solid, bool grid, int samples, bool light = false) {
+      const auto key = pipelineKey(m, wire, solid, grid, light);
       if (auto it = pipelines.find(key); it != pipelines.end()) {
         return it->second.get();
       }
@@ -201,7 +281,7 @@ namespace ds2 {
       }
 
       QRhiGraphicsPipeline::TargetBlend blend;
-      blend.enable = !solid && !unblended && m.blend != Blend::None;
+      blend.enable = !solid && (light || !unblended) && m.blend != Blend::None;
       if (m.blend == Blend::Alpha) {
         blend.srcColor = blend.srcAlpha = QRhiGraphicsPipeline::SrcAlpha;
         blend.dstColor = blend.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
@@ -382,7 +462,7 @@ namespace ds2 {
         d->stride = rhi()->ubufAligned(sizeof(DrawUniform));
         d->frame.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(FrameUniform)));
         require(d->frame->create(), "Cannot create frame buffer");
-        d->draw.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, d->stride * (d->scene->meshes.size() + 1)));
+        d->draw.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, d->stride * (d->scene->meshes.size() + d->scene->lights.size() + 1)));
         require(d->draw->create(), "Cannot create draw buffer");
         d->repeat.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::Repeat, QRhiSampler::Repeat));
         d->clamp.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
@@ -441,6 +521,36 @@ namespace ds2 {
           vertexBytes += grid.size() * sizeof(Vertex);
         }
 
+        QVector<Vertex> lightVertices;
+        QVector<quint32> lightIndices;
+        quint32 lightVertexOffset = 0, lightIndexOffset = 0;
+        quint32 sphereVertexOffset = 0, sphereIndexStart = 0, sphereIndexCount = 0;
+        quint32 coneVertexOffset = 0, coneIndexStart = 0, coneIndexCount = 0;
+        if (m_map && !d->scene->lights.isEmpty()) {
+          lightVertexOffset = quint32(vertexBytes);
+          lightIndexOffset  = quint32(indexBytes / sizeof(quint32));
+          sphereVertexOffset = lightVertexOffset;
+          sphereIndexStart   = lightIndexOffset;
+          appendSphere(lightVertices, lightIndices);
+          sphereIndexCount = quint32(lightIndices.size());
+          coneVertexOffset  = lightVertexOffset + quint32(lightVertices.size() * sizeof(Vertex));
+          coneIndexStart    = lightIndexOffset + quint32(lightIndices.size());
+          appendCone(lightVertices, lightIndices);
+          coneIndexCount = quint32(lightIndices.size()) - sphereIndexCount;
+          d->crossVertexOffset = lightVertexOffset + quint32(lightVertices.size() * sizeof(Vertex));
+          d->crossVertexCount  = 6;
+          for (int axis = 0; axis < 3; ++axis) {
+            for (const float sign : {-1.f, 1.f}) {
+              Vertex v;
+              v.position[axis] = sign * .1f;
+              lightVertices.append(v);
+            }
+          }
+
+          vertexBytes += lightVertices.size() * sizeof(Vertex);
+          indexBytes += lightIndices.size() * sizeof(quint32);
+        }
+
         require(vertexBytes > 0 && vertexBytes <= std::numeric_limits<quint32>::max() && indexBytes <= std::numeric_limits<quint32>::max(), "Scene exceeds GPU buffer limits");
         d->vertices.reset(rhi()->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, quint32(vertexBytes)));
         d->indices.reset(rhi()->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::IndexBuffer, quint32(std::max<qsizetype>(4, indexBytes))));
@@ -456,9 +566,14 @@ namespace ds2 {
           batch->uploadStaticBuffer(d->vertices.get(), d->gridVertexOffset, quint32(grid.size() * sizeof(Vertex)), grid.constData());
         }
 
+        if (!lightVertices.isEmpty()) {
+          batch->uploadStaticBuffer(d->vertices.get(), lightVertexOffset, quint32(lightVertices.size() * sizeof(Vertex)), lightVertices.constData());
+          batch->uploadStaticBuffer(d->indices.get(), lightIndexOffset * 4, quint32(lightIndices.size() * sizeof(quint32)), lightIndices.constData());
+        }
+
         quint32 indexStart = 0;
         int modelDrawIndex = 0;
-        QByteArray uniforms(d->stride * (d->scene->meshes.size() + 1), 0);
+        QByteArray uniforms(d->stride * (d->scene->meshes.size() + d->scene->lights.size() + 1), 0);
         d->meshes.reserve(d->scene->meshes.size());
         d->order.reserve(d->scene->meshes.size());
         d->sortDistances.resize(d->scene->meshes.size());
@@ -499,6 +614,42 @@ namespace ds2 {
           std::memcpy(uniforms.data() + i * d->stride, &u, sizeof(u));
         }
 
+        if (m_map && !d->scene->lights.isEmpty()) {
+          const auto mat   = lightMaterial();
+          d->lightBindings = d->binding(rhi(), batch, mat);
+          d->lights.reserve(d->scene->lights.size());
+          for (qsizetype i = 0; i < d->scene->lights.size(); ++i) {
+            const auto& light = d->scene->lights[i];
+            const bool point = light.type == LightType::Point;
+            if (point) {
+              d->lights.append({sphereVertexOffset, sphereIndexStart, sphereIndexCount});
+            } else {
+              d->lights.append({coneVertexOffset, coneIndexStart, coneIndexCount});
+            }
+
+            QMatrix4x4 transform;
+            transform.translate(light.position);
+            if (!point) {
+              auto direction = light.direction;
+              if (direction.lengthSquared() < 1e-12f) {
+                direction = {0, 0, 1};
+              }
+
+              transform.rotate(QQuaternion::rotationTo({0, 0, 1}, direction.normalized()));
+            }
+
+            transform.scale(light.range);
+            DrawUniform u{};
+            std::memcpy(u.model, transform.constData(), 64);
+            u.tintGain[0] = light.color.x();
+            u.tintGain[1] = light.color.y();
+            u.tintGain[2] = light.color.z();
+            u.tintGain[3] = .35f;
+            u.flags[1]    = 1;
+            std::memcpy(uniforms.data() + (d->scene->meshes.size() + i) * d->stride, &u, sizeof(u));
+          }
+        }
+
         if (!m_map) {
           Material mat;
           mat.albedo      = "$white$";
@@ -509,14 +660,22 @@ namespace ds2 {
           u.tintGain[0] = .22f;
           u.tintGain[1] = .27f;
           u.tintGain[2] = .32f;
+          u.tintGain[3] = 1;
           u.flags[1]    = 1;
-          std::memcpy(uniforms.data() + d->scene->meshes.size() * d->stride, &u, sizeof(u));
+          std::memcpy(uniforms.data() + (d->scene->meshes.size() + d->scene->lights.size()) * d->stride, &u, sizeof(u));
         }
 
         batch->updateDynamicBuffer(d->draw.get(), 0, uniforms);
         d->unblended = m_map && mode != 0;
         for (const auto& mesh : d->scene->meshes) {
           d->pipeline(rhi(), m_target->pass.get(), mesh.material, wireframe, m_map && mode == 4, false, sampleCount());
+        }
+
+        if (showLights && !d->scene->lights.isEmpty()) {
+          const auto mat = lightMaterial();
+          d->pipeline(rhi(), m_target->pass.get(), mat, false, false, false, sampleCount(), true);
+          d->pipeline(rhi(), m_target->pass.get(), mat, true, false, false, sampleCount(), true);
+          d->pipeline(rhi(), m_target->pass.get(), mat, false, false, true, sampleCount(), true);
         }
 
         if (!m_map) {
@@ -577,6 +736,19 @@ namespace ds2 {
 
         visibleCount   = d.order.size();
         const auto eye = camera.eye();
+        if (showLights && !d.lights.isEmpty()) {
+          d.lightOrder.resize(d.lights.size());
+          std::iota(d.lightOrder.begin(), d.lightOrder.end(), 0);
+          d.lightDistances.resize(d.lights.size());
+          for (qsizetype i = 0; i < d.lights.size(); ++i) {
+            d.lightDistances[i] = (m_scene->lights[i].position - eye).lengthSquared();
+          }
+
+          std::sort(d.lightOrder.begin(), d.lightOrder.end(), [&](int a, int b) {
+            return d.lightDistances[a] > d.lightDistances[b];
+          });
+        }
+
         if (m_map) {
           for (int i : d.order) {
             d.sortDistances[i] = (d.meshes[i].center - eye).lengthSquared();
@@ -617,6 +789,13 @@ namespace ds2 {
           d.pipeline(rhi(), m_target->pass.get(), m_scene->meshes[i].material, wireframe, solid, false, sampleCount());
         }
 
+        if (showLights && !d.lights.isEmpty()) {
+          const auto mat = lightMaterial();
+          d.pipeline(rhi(), m_target->pass.get(), mat, false, false, false, sampleCount(), true);
+          d.pipeline(rhi(), m_target->pass.get(), mat, true, false, false, sampleCount(), true);
+          d.pipeline(rhi(), m_target->pass.get(), mat, false, false, true, sampleCount(), true);
+        }
+
         if (!m_map && showGrid) {
           Material mat;
           d.pipeline(rhi(), m_target->pass.get(), mat, false, false, true, sampleCount());
@@ -646,10 +825,34 @@ namespace ds2 {
           cb->drawIndexed(g.indexCount, 1, g.indexStart);
         }
 
+        if (showLights && !d.lightOrder.isEmpty()) {
+          const auto mat = lightMaterial();
+          for (int i : d.lightOrder) {
+            const auto& g = d.lights[i];
+            cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(mat, false, false, false, true)).get());
+            const QRhiCommandBuffer::DynamicOffset offset(1, quint32((d.meshes.size() + i) * d.stride));
+            cb->setShaderResources(d.lightBindings, 1, &offset);
+            const QRhiCommandBuffer::VertexInput input(d.vertices.get(), g.vertexOffset);
+            cb->setVertexInput(0, 1, &input, d.indices.get(), 0, QRhiCommandBuffer::IndexUInt32);
+            cb->drawIndexed(g.indexCount, 1, g.indexStart);
+            cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(mat, true, false, false, true)).get());
+            cb->drawIndexed(g.indexCount, 1, g.indexStart);
+          }
+
+          cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(mat, false, false, true, true)).get());
+          for (int i : d.lightOrder) {
+            const QRhiCommandBuffer::DynamicOffset offset(1, quint32((d.meshes.size() + i) * d.stride));
+            cb->setShaderResources(d.lightBindings, 1, &offset);
+            const QRhiCommandBuffer::VertexInput input(d.vertices.get(), d.crossVertexOffset);
+            cb->setVertexInput(0, 1, &input);
+            cb->draw(d.crossVertexCount);
+          }
+        }
+
         if (!m_map && showGrid) {
           Material mat;
           cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(mat, false, false, true)).get());
-          const QRhiCommandBuffer::DynamicOffset offset(1, quint32(d.meshes.size() * d.stride));
+          const QRhiCommandBuffer::DynamicOffset offset(1, quint32((d.meshes.size() + d.lights.size()) * d.stride));
           cb->setShaderResources(d.gridBindings, 1, &offset);
           const QRhiCommandBuffer::VertexInput input(d.vertices.get(), d.gridVertexOffset);
           cb->setVertexInput(0, 1, &input);

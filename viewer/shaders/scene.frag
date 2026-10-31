@@ -14,7 +14,7 @@ layout(std140, binding = 0) uniform Frame {
 frame;
 
 // Per-mesh DrawUniform from render_widget.cpp:
-// tintGain.rgb: color3 tint; tintGain.a: overbright/self-illumination gain.
+// tintGain.rgb: color3 tint; tintGain.a: lighting gain, or alpha for solid draws.
 // meshCutoff.rgb: mesh debug color; meshCutoff.a: alpha-test cutoff.
 // flags.x bits: 1 use lightmap, 2 use vertex colors, 4 vertex colors present,
 //               8 flip albedo V, 16 flip lightmap V. Bits 2 and 4 must both be set
@@ -37,7 +37,7 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
   if (draw.flags.y == 1) {
-    fragColor = vec4(draw.tintGain.rgb, 1);
+    fragColor = vec4(draw.tintGain.rgb, draw.tintGain.a);
     return;
   }
 

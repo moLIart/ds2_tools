@@ -149,6 +149,11 @@ namespace ds2 {
       m_view->update();
     }, true);
     if (map) {
+      auto* lights = action("Lights", QKeySequence("L"), [this] {
+        m_view->showLights = !m_view->showLights;
+        m_view->update();
+      }, true);
+      lights->setChecked(true);
       m_fly   = action("Fly", QKeySequence("F"), [this] {
         m_view->camera.setFly(m_fly->isChecked());
         m_view->update();
@@ -556,10 +561,27 @@ namespace ds2 {
       m_fly->setChecked(m_view->camera.fly);
     }
 
-    m_stats->setText(scene ? QString("%1 | %2/%3 meshes | %4 FPS%5")
+    QString lightStats;
+    if (scene && m_map) {
+      int point = 0, spot = 0, directional = 0;
+      for (const auto& light : scene->lights) {
+        if (light.type == LightType::Point) {
+          ++point;
+        } else if (light.type == LightType::Spot) {
+          ++spot;
+        } else {
+          ++directional;
+        }
+      }
+
+      lightStats = QString(" | %1 lights: %2 point, %3 spot, %4 directional").arg(scene->lights.size()).arg(point).arg(spot).arg(directional);
+    }
+
+    m_stats->setText(scene ? QString("%1 | %2/%3 meshes%4 | %5 FPS%6")
                                  .arg(scene->version)
                                  .arg(m_view->visibleCount)
                                  .arg(scene->meshes.size())
+                                 .arg(lightStats)
                                  .arg(m_view->fps(), 0, 'f', 1)
                                  .arg(m_map ? QString(" | %1 | speed %2").arg(m_view->camera.fly ? "Fly" : "Orbit").arg(m_view->camera.speed, 0, 'f', 1) : QString())
                            : QString());

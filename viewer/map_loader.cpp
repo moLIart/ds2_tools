@@ -154,6 +154,7 @@ namespace ds2 {
       QVector<Buffer> buffers;
       QStringList lightmaps;
       QVector<VisNode> nodes;
+      QVector<Light> lights;
     };
 
     bool finiteBounds(const Bounds& bounds) {
@@ -315,8 +316,22 @@ namespace ds2 {
           }
         } else if (name == "lights") {
           const auto count = r.count(72);
-          // u32 type, f32 vectors[9], u32 parameters[8]; not part of static lighting.
-          r.take(quint64(count) * 72);
+          out.lights.reserve(count);
+          for (uint32_t i = 0; i < count; ++i) {
+            const auto type = r.integer();
+            if (type < uint32_t(LightType::Point) || type > uint32_t(LightType::Spot)) {
+              fail(QString("Unknown light type %1 at 0x%2").arg(type).arg(r.pos - 4, 0, 16));
+            }
+
+            Light light;
+            light.type      = static_cast<LightType>(type);
+            light.position  = r.vector();
+            light.direction = r.vector();
+            light.color     = r.vector();
+            light.range     = r.real();
+            r.take(28); // Angles and remaining parameters are not needed by the gizmos.
+            out.lights.append(light);
+          }
         } else if (name == "models") {
           const auto count = r.count(30);
           for (uint32_t i = 0; i < count; ++i) {
@@ -794,7 +809,7 @@ namespace ds2 {
 
   Scene loadMap(const QString& path, const QString& gameRoot) {
     Reader reader(path);
-    const auto map = parse(reader);
+    auto map       = parse(reader);
     auto bindings  = validate(map, reader);
     if (map.meshes.isEmpty()) {
       fail("Map contains no geometry");
@@ -805,6 +820,7 @@ namespace ds2 {
     scene.name           = QFileInfo(path).completeBaseName();
     scene.version        = "0.8";
     scene.map            = true;
+    scene.lights         = std::move(map.lights);
     scene.note           = "Static geometry, albedo, lightmaps and instance vertex lighting; game effects and scripted "
                            "objects are not reproduced.";
     auto& resources      = resourcesFor(gameRoot);

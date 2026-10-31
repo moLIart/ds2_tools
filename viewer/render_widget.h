@@ -10,7 +10,7 @@ namespace ds2 {
     explicit RenderWidget(bool map, QWidget* parent = nullptr);
     ~RenderWidget() override;
     Camera camera;
-    bool wireframe = false, showGrid = true;
+    bool wireframe = false, showGrid = true, showLights = true;
     int mode = 0, visibleCount = 0;
     std::function<void(std::shared_ptr<Scene>)> sceneReady;
     std::function<void(QString)> failed;

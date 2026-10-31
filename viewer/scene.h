@@ -62,6 +62,14 @@ namespace ds2 {
     QVector<int> meshes;
   };
 
+  enum class LightType : uint32_t { Point = 1, Directional = 2, Spot = 3 };
+
+  struct Light {
+    LightType type;
+    QVector3D position, direction, color;
+    float range = 0;
+  };
+
   class Animation {
   public:
     virtual ~Animation() = default;
@@ -86,6 +94,7 @@ namespace ds2 {
     QVector<Geometry> geometries;
     QVector<Mesh> meshes;
     QVector<VisNode> visibility;
+    QVector<Light> lights;
     QVector<QVector2D> influences; // matrix index, raw weight; no normalization
     std::shared_ptr<Animation> animation;
     Bounds bounds;

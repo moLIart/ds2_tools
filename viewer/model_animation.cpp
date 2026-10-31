@@ -400,6 +400,9 @@ class Player final : public Animation {
     const QVector<QMatrix4x4> &matrices() const override {
         return palette;
     }
+    const AnimationData &sourceData() const override {
+        return data;
+    }
     Bounds bounds() const override {
         Box weighted, result;
         for (qsizetype i = 0; i < boneBounds.size(); ++i) {

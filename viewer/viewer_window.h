@@ -25,11 +25,13 @@ class ViewerWindow final : public QMainWindow {
     QDoubleSpinBox *m_distance = nullptr, *m_speed = nullptr;
     QSlider *m_timeline = nullptr;
     QAction *m_fly = nullptr, *m_wire, *m_play = nullptr, *m_repeat = nullptr, *m_bind = nullptr;
+    QAction *m_export = nullptr;
     QAction *action(const QString &text, const QKeySequence &shortcut, std::function<void()> callback,
                     bool check = false);
     std::shared_ptr<Animation> animation() const;
     void load(const QString &path);
     void open();
+    void exportModelGlb();
     void changeMap(int delta);
     void selectClip(int index);
     void cycleClip(int direction);

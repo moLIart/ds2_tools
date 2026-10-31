@@ -10,6 +10,9 @@
 #include <memory>
 
 namespace ds2 {
+namespace model {
+struct AnimationData;
+}
 struct Bounds {
     QVector3D low, high;
 };
@@ -65,6 +68,7 @@ class Animation {
     virtual void seek(double seconds) = 0;
     virtual bool update(double seconds) = 0;
     virtual const QVector<QMatrix4x4> &matrices() const = 0;
+    virtual const model::AnimationData &sourceData() const = 0;
     virtual Bounds bounds() const = 0;
 };
 struct Scene {

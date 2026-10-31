@@ -1,4 +1,5 @@
 #include "viewer_window.h"
+#include "glb_export.h"
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
@@ -102,6 +103,12 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
     m_toolbar->setObjectName("viewerToolbar");
     m_toolbar->setMovable(false);
     action("Open...", QKeySequence::Open, [this] { open(); });
+    if (!map) {
+        m_export = action("Export GLB...", QKeySequence("Ctrl+Shift+E"), [this] { exportModelGlb(); });
+        m_export->setObjectName("exportGlb");
+        m_export->setToolTip("Export the model, all animation clips, and embedded textures");
+        m_export->setEnabled(false);
+    }
     if (map) {
         action("< Map", QKeySequence("["), [this] { changeMap(-1); });
         action("Map >", QKeySequence("]"), [this] { changeMap(1); });
@@ -242,7 +249,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
                     "wireframe | Home fit | [ / ] maps | Ctrl+O open\nPgUp/PgDown draw distance | End "
                     "automatic | Esc close"
                   : "LMB orbit | Shift+LMB light | RMB/MMB pan | Wheel zoom\nF fit | L reset light | W "
-                    "wireframe | G grid | Ctrl+O open\nSpace play/pause | [ / ] clips | B bind/stored "
+                    "wireframe | G grid | Ctrl+O open | Ctrl+Shift+E export GLB\nSpace play/pause | [ / ] clips | B bind/stored "
                     "geometry\nArrows seek 0.1s | Shift+Left/Right or Up/Down seek 1s | Home start\n- / + "
                     "speed | R repeat | Esc close");
     });
@@ -396,6 +403,46 @@ void ViewerWindow::changeMap(int delta) {
         i = 0;
     load(m_maps[(i + delta + m_maps.size()) % m_maps.size()]);
 }
+void ViewerWindow::exportModelGlb() {
+    const auto scene = m_view->scene();
+    if (!scene || m_map)
+        return;
+    m_view->releaseMouseCapture();
+    const QFileInfo source(scene->path);
+    QString path = QFileDialog::getSaveFileName(
+        this, "Export model and all animations",
+        source.absoluteDir().filePath(source.completeBaseName() + ".glb"), "Binary glTF (*.glb)");
+    if (path.isEmpty())
+        return;
+    if (QFileInfo(path).suffix().isEmpty())
+        path += ".glb";
+    QStringList warnings;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    try {
+        warnings = exportGlb(*scene, path);
+    } catch (const std::exception &e) {
+        QApplication::restoreOverrideCursor();
+        const QString message = QString("Cannot export %1: %2").arg(path, QString::fromUtf8(e.what()));
+        error(message);
+        QMessageBox::critical(this, "GLB export failed", message);
+        m_view->setFocus();
+        return;
+    }
+    QApplication::restoreOverrideCursor();
+    statusBar()->showMessage(
+        QString("Exported %1%2").arg(path, warnings.isEmpty() ? QString()
+                                   : QString(" | %1 warnings").arg(warnings.size())), 10000);
+    qInfo().noquote() << "Exported" << path;
+    if (!warnings.isEmpty()) {
+        for (const auto &warning : warnings)
+            qWarning().noquote() << warning;
+        QMessageBox message(QMessageBox::Warning, "GLB exported with warnings",
+                            "Saved " + path + "\n\n" + warnings.first(), QMessageBox::Ok, this);
+        message.setDetailedText(warnings.join('\n'));
+        message.exec();
+    }
+    m_view->setFocus();
+}
 void ViewerWindow::selectClip(int index) {
     if (auto a = animation()) {
         try {
@@ -456,6 +503,7 @@ void ViewerWindow::sync() {
                            : QString());
     if (!m_map) {
         auto a = animation();
+        m_export->setEnabled(bool(scene));
         const bool animated = bool(a);
         m_clips->setEnabled(animated);
         m_play->setEnabled(animated);

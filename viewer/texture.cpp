@@ -168,7 +168,49 @@ QImage decodeBC(const char *data, int w, int h, int format) {
         }
     return result;
 }
+struct DdsInfo {
+    uint32_t width, height, mips;
+    int bc;
+};
+DdsInfo ddsInfo(const QByteArray &bytes) {
+    if (bytes.size() < 128 || bytes.first(4) != "DDS " || u32(bytes, 4) != 124)
+        bad("Invalid DDS header");
+    const uint32_t w = u32(bytes, 16), h = u32(bytes, 12), mips = std::max(1u, u32(bytes, 28));
+    const uint32_t code = u32(bytes, 84);
+    if (!w || !h || w > 16384 || h > 16384 || mips > 15)
+        bad("Invalid DDS dimensions/mips");
+    const int bc = code == 0x31545844 ? 1 : code == 0x33545844 ? 2 : code == 0x35545844 ? 3 : 0;
+    if (!bc)
+        bad("Unsupported DDS format (expected DXT1/DXT3/DXT5)");
+    if (int(mips) > 1 + int(std::floor(std::log2(std::max(w, h)))))
+        bad("DDS has more mip levels than its dimensions permit");
+    qsizetype end = 128;
+    for (uint32_t level = 0; level < mips; ++level)
+        end += ((std::max(1u, w >> level) + 3) / 4) *
+               ((std::max(1u, h >> level) + 3) / 4) * (bc == 1 ? 8 : 16);
+    if (end > bytes.size())
+        bad("Truncated DDS mip chain");
+    return {w, h, mips, bc};
+}
 } // namespace
+QImage readTextureImage(const QString &path) {
+    if (path.startsWith('$')) {
+        QImage image(1, 1, QImage::Format_RGBA8888);
+        image.fill(path == "$white$" ? Qt::white : path == "$black$" ? Qt::black : Qt::magenta);
+        return image;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        bad(QString("Cannot open texture %1: %2").arg(path, file.errorString()));
+    const QByteArray bytes = file.readAll();
+    if (file.error() != QFileDevice::NoError)
+        bad(QString("Cannot read texture %1: %2").arg(path, file.errorString()));
+    if (path.endsWith(".dds", Qt::CaseInsensitive)) {
+        const auto info = ddsInfo(bytes);
+        return decodeBC(bytes.constData() + 128, int(info.width), int(info.height), info.bc);
+    }
+    return tga(bytes);
+}
 UploadedTexture loadTexture(QRhi *rhi, QRhiResourceUpdateBatch *batch, const QString &path) {
     QImage image;
     if (path.startsWith('$')) {
@@ -180,18 +222,9 @@ UploadedTexture loadTexture(QRhi *rhi, QRhiResourceUpdateBatch *batch, const QSt
             bad(f.errorString());
         const auto b = f.readAll();
         if (path.endsWith(".dds", Qt::CaseInsensitive)) {
-            if (b.size() < 128 || b.first(4) != "DDS " || u32(b, 4) != 124)
-                bad("Invalid DDS header");
-            const uint32_t w = u32(b, 16), h = u32(b, 12), mips = std::max(1u, u32(b, 28)), code = u32(b, 84);
-            if (!w || !h || w > 16384 || h > 16384 || mips > 15)
-                bad("Invalid DDS dimensions/mips");
-            const int bc = code == 0x31545844 ? 1 : code == 0x33545844 ? 2 : code == 0x35545844 ? 3 : 0;
-            if (!bc)
-                bad("Unsupported DDS format (expected DXT1/DXT3/DXT5)");
+            const auto info = ddsInfo(b);
+            const auto [w, h, mips, bc] = info;
             const auto format = bc == 1 ? QRhiTexture::BC1 : bc == 2 ? QRhiTexture::BC2 : QRhiTexture::BC3;
-            const int full = 1 + int(std::floor(std::log2(std::max(w, h))));
-            if (int(mips) > full)
-                bad("DDS has more mip levels than its dimensions permit");
             const bool compressed = rhi->isTextureFormatSupported(format);
             auto texture = std::unique_ptr<QRhiTexture>(rhi->newTexture(
                 compressed ? format : QRhiTexture::RGBA8, QSize(w, h), 1, QRhiTexture::MipMapped));

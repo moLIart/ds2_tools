@@ -8,6 +8,7 @@ add_library(viewer_common STATIC
     viewer/scene.h viewer/camera.h
     viewer/map_loader.cpp viewer/model_loader.cpp viewer/model_animation.cpp
     viewer/model_animation.h viewer/texture.cpp viewer/texture.h
+    viewer/glb_export.h viewer/glb_export.cpp viewer/glb_animation.cpp
     viewer/render_widget.cpp viewer/render_widget.h viewer/viewer_window.cpp viewer/viewer_window.h)
 target_link_libraries(viewer_common PUBLIC Qt6::Widgets Qt6::GuiPrivate)
 if(WIN32)

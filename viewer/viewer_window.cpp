@@ -10,16 +10,22 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QStyle>
 #include <QStyleOptionSlider>
 #include <QTimer>
 #include <QToolBar>
+#include <QTreeWidget>
+#include <QVBoxLayout>
 
 namespace ds2 {
   namespace {
@@ -111,7 +117,66 @@ namespace ds2 {
     m_view->mode = mode;
     m_view->setDebugLayerEnabled(debug);
     m_view->setObjectName("renderFrame");
-    setCentralWidget(m_view);
+    if (map) {
+      auto* splitter = new QSplitter(Qt::Horizontal, this);
+      splitter->setObjectName("mapSplitter");
+      splitter->setChildrenCollapsible(false);
+      auto* pane = new QWidget(splitter);
+      pane->setMinimumWidth(180);
+      auto* layout = new QVBoxLayout(pane);
+      layout->setContentsMargins(6, 6, 6, 6);
+      auto* hint = new QLabel("Ctrl/Shift: select multiple groups or instances\nDouble-click: fit object", pane);
+      hint->setWordWrap(true);
+      layout->addWidget(hint);
+      m_modelTree = new QTreeWidget(pane);
+      m_modelTree->setObjectName("modelHierarchy");
+      m_modelTree->setAccessibleName("Model groups and instances");
+      m_modelTree->setHeaderLabel("Models");
+      m_modelTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+      m_modelTree->setSelectionBehavior(QAbstractItemView::SelectRows);
+      m_modelTree->setUniformRowHeights(true);
+      m_modelTree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+      m_modelTree->header()->setStretchLastSection(false);
+      layout->addWidget(m_modelTree);
+      auto* clearSelection = new QPushButton("Clear selection", pane);
+      clearSelection->setObjectName("clearModelSelection");
+      layout->addWidget(clearSelection);
+      connect(m_modelTree, &QTreeWidget::itemSelectionChanged, this, [this] {
+        m_view->releaseMouseCapture();
+        selectModelMeshes();
+      });
+      connect(m_modelTree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
+        const auto scene = m_modelScene.lock();
+        if (!scene || scene != m_view->scene()) {
+          return;
+        }
+
+        m_view->releaseMouseCapture();
+        m_modelTree->setCurrentItem(item, 0, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        const auto* parent = item->parent();
+        const auto& model = scene->models[(parent ? parent : item)->data(0, Qt::UserRole).toInt()];
+        const bool hasMeshes = parent ? !model.instances[item->data(0, Qt::UserRole).toInt()].meshes.isEmpty()
+                                      : std::any_of(model.instances.cbegin(), model.instances.cend(), [](const MapModelInstance& instance) {
+                                          return !instance.meshes.isEmpty();
+                                        });
+        if (hasMeshes) {
+          m_view->fit();
+        }
+      });
+      connect(clearSelection, &QPushButton::clicked, this, [this] {
+        m_view->releaseMouseCapture();
+        m_modelTree->clearSelection();
+      });
+      splitter->addWidget(pane);
+      splitter->addWidget(m_view);
+      splitter->setStretchFactor(0, 0);
+      splitter->setStretchFactor(1, 1);
+      splitter->setSizes({260, 1000});
+      setCentralWidget(splitter);
+    } else {
+      setCentralWidget(m_view);
+    }
+
     m_toolbar = addToolBar("Viewer");
     m_toolbar->setObjectName("viewerToolbar");
     m_toolbar->setMovable(false);
@@ -141,9 +206,10 @@ namespace ds2 {
       });
     }
 
-    action("Fit", QKeySequence(map ? "Home" : "F"), [this] {
+    auto* fitAction = action("Fit", QKeySequence(map ? "Home" : "F"), [this] {
       m_view->fit();
     });
+    fitAction->setToolTip(map ? "Frame selected models, or the whole map when nothing is selected" : "Frame the model");
     m_wire = action("Wire", QKeySequence(map ? "G" : "W"), [this] {
       m_view->wireframe = m_wire->isChecked();
       m_view->update();
@@ -154,6 +220,13 @@ namespace ds2 {
         m_view->update();
       }, true);
       lights->setChecked(true);
+      auto* models = action("Models", QKeySequence("M"), [this] {
+        m_view->showModels = !m_view->showModels;
+        m_view->update();
+      }, true);
+      models->setObjectName("showModels");
+      models->setChecked(m_view->showModels);
+      models->setToolTip("Show baked model geometry; world geometry remains visible");
       m_fly   = action("Fly", QKeySequence("F"), [this] {
         m_view->camera.setFly(m_fly->isChecked());
         m_view->update();
@@ -261,8 +334,10 @@ namespace ds2 {
       QMessageBox::information(this, "Controls",
                                m_map ? "LMB orbit | MMB pan | Wheel zoom/speed | RMB fly-look\nF fly/orbit | WASD, Q/E move | "
                                        "Shift fast\n1 combined | 2 albedo | 3 lightmap | 4 vertex colors | 5 mesh colors\nG "
-                                       "wireframe | Home fit | Map list select | Ctrl+O open\nPgUp/PgDown draw distance | End "
-                                       "automatic | Esc close"
+                                       "wireframe | M models | L lights | Home fit\n"
+                                       "Model tree: select groups or instances to show AABBs and axes | Ctrl/Shift multi-select\n"
+                                       "Clear selection removes gizmos | Map list select | Ctrl+O open\n"
+                                       "PgUp/PgDown draw distance | End automatic | Esc close"
                                      : "LMB orbit | Shift+LMB light | RMB/MMB pan | Wheel zoom\nF fit | L reset light | W "
                                        "wireframe | G grid | Ctrl+O open | Ctrl+Shift+E export GLB\nSpace play/pause | [ / ] clips | B bind/stored "
                                        "geometry\nArrows seek 0.1s | Shift+Left/Right or Up/Down seek 1s | Home start\n- / + "
@@ -325,6 +400,11 @@ namespace ds2 {
     };
     m_view->sceneReady = [this](const std::shared_ptr<Scene>& scene) {
       m_loaded = true;
+      const bool newModelScene = m_modelTree && m_modelScene.lock() != scene;
+      if (newModelScene) {
+        populateModelTree(scene);
+      }
+
       setWindowTitle(QFileInfo(scene->path).fileName() + (m_map ? " - DS2 Map Viewer" : " - DS2MD Model Viewer"));
       qsizetype vertices = 0, triangles = 0;
       for (const auto& g : scene->geometries) {
@@ -372,7 +452,10 @@ namespace ds2 {
       }
 
       sync();
-      m_view->setFocus();
+      if (!m_map || newModelScene) {
+        m_view->setFocus();
+      }
+
       if (!m_screenshot.isEmpty()) {
         QTimer::singleShot(200, this, [this] {
           if (!m_loaded) {
@@ -410,6 +493,50 @@ namespace ds2 {
     } else if (m_maps && m_maps->count() > 0) {
       load(m_maps->itemData(0).toString());
     }
+  }
+
+  void ViewerWindow::populateModelTree(const std::shared_ptr<Scene>& scene) {
+    QSignalBlocker blocker(m_modelTree);
+    m_modelTree->clear();
+    m_modelScene = scene;
+    m_view->setSelectedMeshes({});
+    for (int groupIndex = 0; groupIndex < scene->models.size(); ++groupIndex) {
+      const auto& model = scene->models[groupIndex];
+      auto* group = new QTreeWidgetItem(m_modelTree, {QString("Group %1: %2 (%3 instances)").arg(groupIndex).arg(model.name).arg(model.instances.size())});
+      group->setData(0, Qt::UserRole, groupIndex);
+      group->setToolTip(0, group->text(0));
+      for (int instanceIndex = 0; instanceIndex < model.instances.size(); ++instanceIndex) {
+        const auto& instance = model.instances[instanceIndex];
+        auto* item = new QTreeWidgetItem(group, {QString("Instance %1 (%2 meshes)").arg(instanceIndex).arg(instance.meshes.size())});
+        item->setData(0, Qt::UserRole, instanceIndex);
+      }
+    }
+  }
+
+  void ViewerWindow::selectModelMeshes() {
+    const auto scene = m_modelScene.lock();
+    if (!scene || scene != m_view->scene()) {
+      return;
+    }
+
+    QVector<int> meshes;
+    for (const auto* item : m_modelTree->selectedItems()) {
+      const auto* group = item->parent();
+      if (group && group->isSelected()) {
+        continue;
+      }
+
+      const auto& model = scene->models[(group ? group : item)->data(0, Qt::UserRole).toInt()];
+      if (group) {
+        meshes += model.instances[item->data(0, Qt::UserRole).toInt()].meshes;
+      } else {
+        for (const auto& instance : model.instances) {
+          meshes += instance.meshes;
+        }
+      }
+    }
+
+    m_view->setSelectedMeshes(std::move(meshes));
   }
 
   void ViewerWindow::error(const QString& message) {

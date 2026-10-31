@@ -130,6 +130,81 @@ namespace ds2 {
         indices.append(current);
       }
     }
+
+    const Material& gizmoMaterial() {
+      static const Material material = [] {
+        Material m;
+        m.albedo     = "$white$";
+        m.depthTest  = false;
+        m.depthWrite = false;
+        return m;
+      }();
+      return material;
+    }
+
+    void buildSelectionGizmos(const Scene& scene, const QVector<int>& selected, QVector<Vertex>& vertices) {
+      vertices.clear();
+      if (selected.isEmpty()) {
+        return;
+      }
+
+      vertices.reserve(selected.size() * 30);
+      auto add = [&](const QVector3D& point, const QVector3D& color) {
+        auto& vertex = vertices.emplaceBack();
+        for (int axis = 0; axis < 3; ++axis) {
+          vertex.position[axis] = point[axis];
+          vertex.color[axis]    = color[axis];
+        }
+      };
+      auto isSelected = [&](int mesh) {
+        return std::binary_search(selected.cbegin(), selected.cend(), mesh);
+      };
+      constexpr float axisColors[3][3] = {{1.f, .2f, .2f}, {.2f, 1.f, .3f}, {.3f, .5f, 1.f}};
+      for (const auto& model : scene.models) {
+        for (const auto& instance : model.instances) {
+          if (instance.meshes.isEmpty() || std::none_of(instance.meshes.cbegin(), instance.meshes.cend(), isSelected)) {
+            continue;
+          }
+
+          const auto& firstMesh = scene.meshes[instance.meshes.first()];
+          auto box = firstMesh.bounds;
+          for (qsizetype i = 1; i < instance.meshes.size(); ++i) {
+            const auto& bounds = scene.meshes[instance.meshes[i]].bounds;
+            for (int axis = 0; axis < 3; ++axis) {
+              box.low[axis]  = std::min(box.low[axis], bounds.low[axis]);
+              box.high[axis] = std::max(box.high[axis], bounds.high[axis]);
+            }
+          }
+
+          // Mesh AABBs are already world-space; do not transform their corners again.
+          QVector3D corners[8];
+          for (int corner = 0; corner < 8; ++corner) {
+            corners[corner] = {corner & 1 ? box.high.x() : box.low.x(), corner & 2 ? box.high.y() : box.low.y(), corner & 4 ? box.high.z() : box.low.z()};
+          }
+
+          for (int axis = 0; axis < 3; ++axis) {
+            for (int corner = 0; corner < 8; ++corner) {
+              if (!(corner & (1 << axis))) {
+                add(corners[corner], {1.f, .7f, .2f});
+                add(corners[corner | (1 << axis)], {1.f, .7f, .2f});
+              }
+            }
+          }
+
+          const auto& transform = firstMesh.transform;
+          const auto origin = transform.column(3).toVector3D();
+          const float length = std::clamp((box.high - box.low).length() * .15f, 5.f, 100.f);
+          for (int axis = 0; axis < 3; ++axis) {
+            const auto direction = transform.column(axis).toVector3D().normalized();
+            if (!direction.isNull()) {
+              const QVector3D color(axisColors[axis][0], axisColors[axis][1], axisColors[axis][2]);
+              add(origin, color);
+              add(origin + direction * length, color);
+            }
+          }
+        }
+      }
+    }
   } // namespace
 
   struct RenderWidget::Target {
@@ -159,6 +234,8 @@ namespace ds2 {
 
     QVector<MeshGpu> meshes;
     QVector<int> order;
+    std::unique_ptr<QRhiBuffer> gizmos;
+    quint32 gizmoVertexCount = 0;
     QVector<float> sortDistances;
     QVector<LightGpu> lights;
     QVector<int> lightOrder;
@@ -171,6 +248,7 @@ namespace ds2 {
     quint32 crossVertexOffset = 0, crossVertexCount = 0;
     QRhiShaderResourceBindings* gridBindings = nullptr;
     QRhiShaderResourceBindings* lightBindings = nullptr;
+    QRhiShaderResourceBindings* gizmoBindings = nullptr;
     Bounds gridBounds;
     QShader vert, frag;
 
@@ -357,6 +435,27 @@ namespace ds2 {
     update();
   }
 
+  void RenderWidget::setSelectedMeshes(QVector<int> meshes) {
+    meshes.erase(std::remove_if(meshes.begin(), meshes.end(), [this](int index) {
+      return index < 0 || !m_scene || index >= m_scene->meshes.size();
+    }), meshes.end());
+    std::sort(meshes.begin(), meshes.end());
+    meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
+    if (meshes == m_selectedMeshes) {
+      return;
+    }
+
+    m_selectedMeshes = std::move(meshes);
+    if (m_map && m_scene) {
+      buildSelectionGizmos(*m_scene, m_selectedMeshes, m_selectionGizmos);
+    } else {
+      m_selectionGizmos.clear();
+    }
+
+    m_gizmosDirty = true;
+    update();
+  }
+
   Bounds RenderWidget::bounds(bool grid) const {
     if (!m_scene) {
       return {};
@@ -375,7 +474,19 @@ namespace ds2 {
 
   void RenderWidget::fit() {
     if (m_scene) {
-      camera.fit(bounds(), float(width()) / std::max(height(), 1));
+      const bool fitSelection = m_map && !m_selectedMeshes.isEmpty();
+      Bounds fitBounds = fitSelection ? m_scene->meshes[m_selectedMeshes.first()].bounds : bounds();
+      if (fitSelection) {
+        for (qsizetype i = 1; i < m_selectedMeshes.size(); ++i) {
+          const auto& meshBounds = m_scene->meshes[m_selectedMeshes[i]].bounds;
+          for (int axis = 0; axis < 3; ++axis) {
+            fitBounds.low[axis]  = std::min(fitBounds.low[axis], meshBounds.low[axis]);
+            fitBounds.high[axis] = std::max(fitBounds.high[axis], meshBounds.high[axis]);
+          }
+        }
+      }
+
+      camera.fit(fitBounds, float(width()) / std::max(height(), 1));
     }
 
     update();
@@ -398,7 +509,7 @@ namespace ds2 {
     m_data.reset();
     m_target.reset();
     m_owner = nullptr;
-    if (m_scene) {
+    if (m_scene && !m_pending) {
       m_pending = m_scene;
     }
   }
@@ -462,7 +573,8 @@ namespace ds2 {
         d->stride = rhi()->ubufAligned(sizeof(DrawUniform));
         d->frame.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(FrameUniform)));
         require(d->frame->create(), "Cannot create frame buffer");
-        d->draw.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, d->stride * (d->scene->meshes.size() + d->scene->lights.size() + 1)));
+        const auto drawBytes = d->stride * (d->scene->meshes.size() + d->scene->lights.size() + 1);
+        d->draw.reset(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, quint32(drawBytes)));
         require(d->draw->create(), "Cannot create draw buffer");
         d->repeat.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::Repeat, QRhiSampler::Repeat));
         d->clamp.reset(rhi()->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
@@ -573,7 +685,7 @@ namespace ds2 {
 
         quint32 indexStart = 0;
         int modelDrawIndex = 0;
-        QByteArray uniforms(d->stride * (d->scene->meshes.size() + d->scene->lights.size() + 1), 0);
+        QByteArray uniforms(drawBytes, 0);
         d->meshes.reserve(d->scene->meshes.size());
         d->order.reserve(d->scene->meshes.size());
         d->sortDistances.resize(d->scene->meshes.size());
@@ -665,6 +777,15 @@ namespace ds2 {
           std::memcpy(uniforms.data() + (d->scene->meshes.size() + d->scene->lights.size()) * d->stride, &u, sizeof(u));
         }
 
+        if (m_map) {
+          d->gizmoBindings = d->binding(rhi(), batch, gizmoMaterial());
+          DrawUniform u{};
+          QMatrix4x4 identity;
+          std::memcpy(u.model, identity.constData(), 64);
+          u.flags[1] = 2;
+          std::memcpy(uniforms.data() + (d->scene->meshes.size() + d->scene->lights.size()) * d->stride, &u, sizeof(u));
+        }
+
         batch->updateDynamicBuffer(d->draw.get(), 0, uniforms);
         d->unblended = m_map && mode != 0;
         for (const auto& mesh : d->scene->meshes) {
@@ -686,9 +807,15 @@ namespace ds2 {
         cb->resourceUpdate(batch);
         batch   = nullptr;
         m_data  = std::move(d);
+        if (m_scene != m_pending) {
+          m_selectedMeshes.clear();
+          m_selectionGizmos.clear();
+        }
+
         m_scene = m_pending;
         m_pending.reset();
         m_paletteDirty = false;
+        m_gizmosDirty   = true;
         m_poseBounds   = m_scene->animation ? m_scene->animation->bounds() : m_scene->bounds;
         m_lastTick     = m_clock.nsecsElapsed();
         fit();
@@ -732,6 +859,31 @@ namespace ds2 {
         } else {
           d.order.resize(d.meshes.size());
           std::iota(d.order.begin(), d.order.end(), 0);
+        }
+
+        if (m_gizmosDirty) {
+          const quint64 bytes = quint64(m_selectionGizmos.size()) * sizeof(Vertex);
+          require(bytes <= std::numeric_limits<quint32>::max(), "Selection gizmos exceed GPU buffer limits");
+          if (bytes) {
+            if (!d.gizmos || bytes > quint64(d.gizmos->size())) {
+              const quint64 capacity = std::max<quint64>(bytes, d.gizmos ? quint64(d.gizmos->size()) * 2 : 4096);
+              auto buffer = std::unique_ptr<QRhiBuffer>(rhi()->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::VertexBuffer,
+                                                                     quint32(std::min<quint64>(capacity, std::numeric_limits<quint32>::max()))));
+              require(buffer->create(), "Cannot create selection gizmo buffer");
+              d.gizmos = std::move(buffer);
+            }
+
+            batch->updateDynamicBuffer(d.gizmos.get(), 0, quint32(bytes), m_selectionGizmos.constData());
+          }
+
+          d.gizmoVertexCount = quint32(m_selectionGizmos.size());
+          m_gizmosDirty = false;
+        }
+
+        if (m_map && !showModels) {
+          d.order.erase(std::remove_if(d.order.begin(), d.order.end(), [this](int index) {
+            return m_scene->meshes[index].mapModel;
+          }), d.order.end());
         }
 
         visibleCount   = d.order.size();
@@ -800,6 +952,10 @@ namespace ds2 {
           Material mat;
           d.pipeline(rhi(), m_target->pass.get(), mat, false, false, true, sampleCount());
         }
+
+        if (d.gizmoVertexCount) {
+          d.pipeline(rhi(), m_target->pass.get(), gizmoMaterial(), false, false, true, sampleCount());
+        }
       }
 
       cb->beginPass(m_target->rt.get(), m_map ? QColor::fromRgbF(.055f, .07f, .09f, 1.f) : QColor::fromRgbF(.075f, .09f, .115f, 1.f), {m_map ? 0.f : 1.f, 0}, batch);
@@ -857,6 +1013,15 @@ namespace ds2 {
           const QRhiCommandBuffer::VertexInput input(d.vertices.get(), d.gridVertexOffset);
           cb->setVertexInput(0, 1, &input);
           cb->draw(d.gridVertexCount);
+        }
+
+        if (d.gizmoVertexCount) {
+          cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(gizmoMaterial(), false, false, true)).get());
+          const QRhiCommandBuffer::DynamicOffset offset(1, quint32((d.meshes.size() + d.lights.size()) * d.stride));
+          cb->setShaderResources(d.gizmoBindings, 1, &offset);
+          const QRhiCommandBuffer::VertexInput input(d.gizmos.get(), 0);
+          cb->setVertexInput(0, 1, &input);
+          cb->draw(d.gizmoVertexCount);
         }
       }
 

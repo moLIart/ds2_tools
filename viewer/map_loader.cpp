@@ -145,6 +145,7 @@ namespace ds2 {
       Bounds bounds;
       uint32_t lightmap = absent, vertexCount = 0, vertexBuffer = absent, vertexStart = 0;
       uint32_t colorBuffer = absent, colorStart = 0;
+      uint32_t modelGroup = absent, modelInstance = absent;
       DrawRange list, strip;
       QMatrix4x4 matrix;
     };
@@ -155,6 +156,7 @@ namespace ds2 {
       QStringList lightmaps;
       QVector<VisNode> nodes;
       QVector<Light> lights;
+      QVector<MapModel> models;
     };
 
     bool finiteBounds(const Bounds& bounds) {
@@ -218,8 +220,9 @@ namespace ds2 {
                 }
               }
 
-              mesh.matrix = QMatrix4x4(matrix); // File rows; Qt constructor converts to column-major storage.
-              r.take(8);                        // Advisory model group/instance references are not authoritative.
+              mesh.matrix        = QMatrix4x4(matrix); // File rows; Qt constructor converts to column-major storage.
+              mesh.modelGroup    = r.integer();
+              mesh.modelInstance = r.integer();
             }
 
             out.meshes.append(std::move(mesh));
@@ -334,11 +337,23 @@ namespace ds2 {
           }
         } else if (name == "models") {
           const auto count = r.count(30);
+          out.models.reserve(count);
           for (uint32_t i = 0; i < count; ++i) {
-            r.string();
-            r.take(24); // Group AABB.
+            MapModel model;
+            model.name           = r.string();
+            model.bounds         = r.bounds();
             const auto instances = r.count(88);
-            r.take(quint64(instances) * 88); // Matrix and world AABB; do not duplicate meshes.
+            model.instances.reserve(instances);
+            for (uint32_t j = 0; j < instances; ++j) {
+              float matrix[16];
+              for (float& value : matrix) {
+                value = r.real();
+              }
+
+              model.instances.append({QMatrix4x4(matrix), r.bounds()});
+            }
+
+            out.models.append(std::move(model));
           }
         } else {
           fail(QString("Unknown chunk '%1' at 0x%2; no size to safely skip it").arg(name).arg(chunkOffset, 0, 16));
@@ -352,6 +367,64 @@ namespace ds2 {
       }
 
       return out;
+    }
+
+    void bindModelMeshes(Scene& scene, const QVector<MapMesh>& sources) {
+      int unresolved = 0;
+      for (qsizetype meshId = 0; meshId < sources.size(); ++meshId) {
+        const auto& source = sources[meshId];
+        if (!source.instanced) {
+          continue;
+        }
+
+        const float* matrix = source.matrix.constData();
+        auto matchesMatrix = [&](const MapModelInstance& instance) {
+          return std::equal(matrix, matrix + 16, instance.transform.constData());
+        };
+        int groupId = -1, instanceId = -1;
+        auto findMatches = [&](int firstGroup, int lastGroup) {
+          int matches = 0;
+          for (int group = firstGroup; group < lastGroup; ++group) {
+            const auto& instances = scene.models[group].instances;
+            for (qsizetype instance = 0; instance < instances.size(); ++instance) {
+              if (matchesMatrix(instances[instance])) {
+                groupId    = group;
+                instanceId = int(instance);
+                if (++matches == 2) {
+                  return matches; // Ambiguous transforms must not select unrelated geometry.
+                }
+              }
+            }
+          }
+
+          return matches;
+        };
+        int matches = 0;
+        if (source.modelGroup < uint32_t(scene.models.size())) {
+          const auto& group = scene.models[int(source.modelGroup)];
+          if (source.modelInstance < uint32_t(group.instances.size()) && matchesMatrix(group.instances[int(source.modelInstance)])) {
+            groupId    = int(source.modelGroup);
+            instanceId = int(source.modelInstance);
+            matches    = 1;
+          } else {
+            matches = findMatches(int(source.modelGroup), int(source.modelGroup) + 1);
+          }
+        }
+
+        if (!matches) {
+          matches = findMatches(0, int(scene.models.size()));
+        }
+
+        if (matches == 1) {
+          scene.models[groupId].instances[instanceId].meshes.append(int(meshId));
+        } else {
+          ++unresolved;
+        }
+      }
+
+      if (unresolved) {
+        scene.warnings.append(QString("Model hierarchy: %1 meshes have no unique matching instance; omitted from selection").arg(unresolved));
+      }
     }
 
     using Binding = std::array<uint32_t, 4>;
@@ -821,8 +894,16 @@ namespace ds2 {
     scene.version        = "0.8";
     scene.map            = true;
     scene.lights         = std::move(map.lights);
+    scene.models         = std::move(map.models);
     scene.note           = "Static geometry, albedo, lightmaps and instance vertex lighting; game effects and scripted "
                            "objects are not reproduced.";
+    qsizetype instanceCount = 0;
+    for (const auto& model : scene.models) {
+      instanceCount += model.instances.size();
+    }
+
+    scene.note += QString("\nModels: %1 groups, %2 instances; M toggles geometry; select groups or instances in the model tree to show AABBs and axes")
+                      .arg(scene.models.size()).arg(instanceCount);
     auto& resources      = resourcesFor(gameRoot);
     auto& materials      = resources.materials;
     const auto& textures = resources.textures;
@@ -909,6 +990,7 @@ namespace ds2 {
       mesh.bounds       = source.bounds; // Already world space, including the instance matrix.
       mesh.transform    = source.matrix;
       mesh.sortGeometry = int(source.vertexBuffer);
+      mesh.mapModel     = source.instanced;
       appendIndices(mesh.indices, source, map, reader);
       auto& m       = mesh.material;
       m.name        = d.name;
@@ -941,6 +1023,8 @@ namespace ds2 {
         scene.bounds.high[axis] = std::max(scene.bounds.high[axis], source.bounds.high[axis]);
       }
     }
+
+    bindModelMeshes(scene, map.meshes);
 
     lightmaps.reserve(map.lightmaps.size());
     for (const auto& reference : map.lightmaps) {

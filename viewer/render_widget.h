@@ -10,7 +10,7 @@ namespace ds2 {
     explicit RenderWidget(bool map, QWidget* parent = nullptr);
     ~RenderWidget() override;
     Camera camera;
-    bool wireframe = false, showGrid = true, showLights = true;
+    bool wireframe = false, showGrid = true, showLights = true, showModels = true;
     int mode = 0, visibleCount = 0;
     std::function<void(std::shared_ptr<Scene>)> sceneReady;
     std::function<void(QString)> failed;
@@ -19,6 +19,7 @@ namespace ds2 {
     std::function<void()> changed;
     std::shared_ptr<Scene> scene() const;
     void setScene(std::shared_ptr<Scene> scene);
+    void setSelectedMeshes(QVector<int> meshes);
     void fit();
     void releaseMouseCapture();
     void poseChanged();
@@ -47,7 +48,9 @@ namespace ds2 {
     struct Data;
     std::unique_ptr<Data> m_data;
     std::shared_ptr<Scene> m_pending, m_scene;
-    bool m_map, m_paletteDirty = true;
+    QVector<int> m_selectedMeshes;
+    QVector<Vertex> m_selectionGizmos;
+    bool m_map, m_paletteDirty = true, m_gizmosDirty = true;
     Bounds m_poseBounds;
     QSet<int> m_keys;
     Qt::MouseButtons m_buttons;

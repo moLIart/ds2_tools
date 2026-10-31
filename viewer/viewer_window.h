@@ -7,6 +7,7 @@ class QDoubleSpinBox;
 class QLabel;
 class QSlider;
 class QToolBar;
+class QTreeWidget;
 
 namespace ds2 {
   class ViewerWindow final : public QMainWindow {
@@ -22,6 +23,8 @@ namespace ds2 {
     QComboBox *m_maps = nullptr, *m_modes = nullptr, *m_clips = nullptr;
     QDoubleSpinBox* m_speed = nullptr;
     QSlider* m_timeline = nullptr;
+    QTreeWidget* m_modelTree = nullptr;
+    std::weak_ptr<Scene> m_modelScene;
     QAction *m_fly = nullptr, *m_wire, *m_play = nullptr, *m_repeat = nullptr, *m_bind = nullptr;
     QAction* m_export = nullptr;
     QAction* action(const QString& text, const QKeySequence& shortcut, std::function<void()> callback, bool check = false);
@@ -34,6 +37,8 @@ namespace ds2 {
     void play();
     void seek(double time);
     void sync();
+    void populateModelTree(const std::shared_ptr<Scene>& scene);
+    void selectModelMeshes();
     void error(const QString& message);
   };
 

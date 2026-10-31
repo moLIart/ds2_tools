@@ -54,6 +54,7 @@ namespace ds2 {
     Material material;
     QMatrix4x4 transform;
     Bounds bounds; // world-space for maps
+    bool mapModel = false; // Map meshes.instanced flag; independent of advisory model references.
   };
 
   struct VisNode {
@@ -68,6 +69,18 @@ namespace ds2 {
     LightType type;
     QVector3D position, direction, color;
     float range = 0;
+  };
+
+  struct MapModelInstance {
+    QMatrix4x4 transform;
+    Bounds bounds; // Stored world-space AABB, not transformed group bounds.
+    QVector<int> meshes; // Resolved baked mesh IDs; selection never relies on stored instance bounds.
+  };
+
+  struct MapModel {
+    QString name;
+    Bounds bounds; // Local-space AABB.
+    QVector<MapModelInstance> instances;
   };
 
   class Animation {
@@ -95,6 +108,7 @@ namespace ds2 {
     QVector<Mesh> meshes;
     QVector<VisNode> visibility;
     QVector<Light> lights;
+    QVector<MapModel> models;
     QVector<QVector2D> influences; // matrix index, raw weight; no normalization
     std::shared_ptr<Animation> animation;
     Bounds bounds;

@@ -61,9 +61,8 @@ namespace ds2 {
       dy = -dy;
       if (map) {
         if (buttons & (Qt::LeftButton | Qt::RightButton)) {
-          const float sign = fly ? 1.f : -1.f;
-          yaw -= sign * dx * .005f;
-          pitch = std::clamp(pitch - sign * dy * .005f, -1.55f, 1.55f);
+          yaw -= dx * .005f;
+          pitch = std::clamp(pitch - dy * .005f, -1.55f, 1.55f);
         } else if (buttons & Qt::MiddleButton) {
           const QVector3D right(-std::sin(yaw), std::cos(yaw), 0);
           const auto d = (right * (-dx) + QVector3D(0, 0, -dy)) * distance / std::max(height, 1);

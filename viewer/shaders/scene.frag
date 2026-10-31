@@ -19,7 +19,7 @@ frame;
 // flags.x bits: 1 use lightmap, 2 use vertex colors, 4 vertex colors present,
 //               8 flip albedo V, 16 flip lightmap V. Bits 2 and 4 must both be set
 //               for vertex colors to affect lighting and alpha.
-// flags.y: 1 draws solid tintGain.rgb and disables skinning (used by the grid).
+// flags.y: 1 solid tintGain, 2 vertex colors for gizmos; both disable skinning.
 // flags.z/w: albedo/lightmap last mip indices; not used by this shader.
 layout(std140, binding = 1) uniform Draw {
   mat4 model;
@@ -36,8 +36,8 @@ layout(binding = 3) uniform sampler2D lightmap;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-  if (draw.flags.y == 1) {
-    fragColor = vec4(draw.tintGain.rgb, draw.tintGain.a);
+  if (draw.flags.y != 0) {
+    fragColor = draw.flags.y == 2 ? vertexColor : vec4(draw.tintGain.rgb, draw.tintGain.a);
     return;
   }
 

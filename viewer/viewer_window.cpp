@@ -172,49 +172,6 @@ namespace ds2 {
         });
       }
 
-      m_toolbar->addSeparator();
-      m_toolbar->addWidget(new QLabel("Distance: ", m_toolbar));
-      m_distance = new QDoubleSpinBox(m_toolbar);
-      m_distance->setObjectName("drawDistance");
-      m_distance->setRange(0, 1e8);
-      m_distance->setDecimals(1);
-      m_distance->setSpecialValueText("Auto");
-      m_distance->setSingleStep(100);
-      m_distance->setMaximumWidth(120);
-      m_toolbar->addWidget(m_distance);
-      connect(m_distance, &QDoubleSpinBox::valueChanged, this, [this](double v) {
-        if (v > 0 && v < 1) {
-          m_distance->setValue(1);
-          return;
-        }
-
-        m_view->camera.drawDistance = float(v);
-        m_view->update();
-      });
-      auto distance = [this](float factor) {
-        auto& c    = m_view->camera;
-        auto scene = m_view->scene();
-        if (!scene) {
-          return;
-        }
-
-        const float d = c.drawDistance > 0 ? c.drawDistance : c.planes(scene->bounds, false).second;
-        m_distance->setValue(std::clamp(d * factor, 1.f, 1e8f));
-      };
-      auto *up = new QAction(this), *down = new QAction(this), *automatic = new QAction(this);
-      up->setShortcut(QKeySequence("PgUp"));
-      down->setShortcut(QKeySequence("PgDown"));
-      automatic->setShortcut(QKeySequence("End"));
-      addActions({up, down, automatic});
-      connect(up, &QAction::triggered, this, [distance] {
-        distance(1.25f);
-      });
-      connect(down, &QAction::triggered, this, [distance] {
-        distance(.8f);
-      });
-      connect(automatic, &QAction::triggered, this, [this] {
-        m_distance->setValue(0);
-      });
       const QDir mapsDir(QDir(root).filePath(QStringLiteral("gameres/maps")));
       QStringList maps;
       QDirIterator it(mapsDir.path(), {"*.ds2"}, QDir::Files, QDirIterator::Subdirectories);

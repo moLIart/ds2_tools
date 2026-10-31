@@ -20,7 +20,7 @@ namespace ds2 {
     QToolBar* m_toolbar;
     QLabel *m_stats, *m_time = nullptr;
     QComboBox *m_maps = nullptr, *m_modes = nullptr, *m_clips = nullptr;
-    QDoubleSpinBox *m_distance = nullptr, *m_speed = nullptr;
+    QDoubleSpinBox* m_speed = nullptr;
     QSlider* m_timeline = nullptr;
     QAction *m_fly = nullptr, *m_wire, *m_play = nullptr, *m_repeat = nullptr, *m_bind = nullptr;
     QAction* m_export = nullptr;

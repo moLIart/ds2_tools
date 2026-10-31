@@ -11,7 +11,6 @@ namespace ds2 {
     bool map = false, fly = false;
     QVector3D target, flyEye;
     float yaw = -.95f, pitch = .45f, distance = 10, radius = 1, speed = 200;
-    float drawDistance = 0; // zero: automatic
     float lightYaw = 0, lightPitch = 0;
 
     Camera(bool isMap = false) : map(isMap) {
@@ -110,16 +109,11 @@ namespace ds2 {
       return true;
     }
 
-    std::pair<float, float> planes(const Bounds& bounds, bool cap = true) const {
+    std::pair<float, float> planes(const Bounds& bounds) const {
       const auto f = forward(), e = eye(), center = (bounds.low + bounds.high) * .5f, half = (bounds.high - bounds.low) * .5f;
       const float cd = QVector3D::dotProduct(center - e, f), hd = half.x() * std::abs(f.x()) + half.y() * std::abs(f.y()) + half.z() * std::abs(f.z());
       const float pad = map ? std::max(1.f, hd * .01f) : std::max(hd * .1f, distance * .001f);
-      float near = std::max(map ? .5f : distance * .01f, cd - hd - pad), far = std::max(near + (map ? 1.f : pad), cd + hd + pad);
-      if (map && cap && drawDistance > 0) {
-        far  = std::min(far, drawDistance);
-        near = std::min(near, far - .5f);
-      }
-
+      const float near = std::max(map ? .5f : distance * .01f, cd - hd - pad), far = std::max(near + (map ? 1.f : pad), cd + hd + pad);
       return {near, far};
     }
 

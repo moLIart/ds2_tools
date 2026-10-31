@@ -142,13 +142,20 @@ namespace ds2 {
       return material;
     }
 
+    constexpr float axisColors[3][3] = {{1.f, .2f, .2f}, {.2f, 1.f, .3f}, {.3f, .5f, 1.f}};
+
+    QPointF screenPoint(const QVector3D& point, const QMatrix4x4& clip, const QSize& size) {
+      const auto p = clip * QVector4D(point, 1);
+      return {(p.x() / p.w() + 1) * size.width() * .5, (1 - p.y() / p.w()) * size.height() * .5};
+    }
+
     void buildSelectionGizmos(const Scene& scene, const QVector<int>& selected, QVector<Vertex>& vertices) {
       vertices.clear();
       if (selected.isEmpty()) {
         return;
       }
 
-      vertices.reserve(selected.size() * 30);
+      vertices.reserve(selected.size() * 24 + 27);
       auto add = [&](const QVector3D& point, const QVector3D& color) {
         auto& vertex = vertices.emplaceBack();
         for (int axis = 0; axis < 3; ++axis) {
@@ -159,7 +166,6 @@ namespace ds2 {
       auto isSelected = [&](int mesh) {
         return std::binary_search(selected.cbegin(), selected.cend(), mesh);
       };
-      constexpr float axisColors[3][3] = {{1.f, .2f, .2f}, {.2f, 1.f, .3f}, {.3f, .5f, 1.f}};
       for (const auto& model : scene.models) {
         for (const auto& instance : model.instances) {
           if (instance.meshes.isEmpty() || std::none_of(instance.meshes.cbegin(), instance.meshes.cend(), isSelected)) {
@@ -188,18 +194,6 @@ namespace ds2 {
                 add(corners[corner], {1.f, .7f, .2f});
                 add(corners[corner | (1 << axis)], {1.f, .7f, .2f});
               }
-            }
-          }
-
-          const auto& transform = firstMesh.transform;
-          const auto origin = transform.column(3).toVector3D();
-          const float length = std::clamp((box.high - box.low).length() * .15f, 5.f, 100.f);
-          for (int axis = 0; axis < 3; ++axis) {
-            const auto direction = transform.column(axis).toVector3D().normalized();
-            if (!direction.isNull()) {
-              const QVector3D color(axisColors[axis][0], axisColors[axis][1], axisColors[axis][2]);
-              add(origin, color);
-              add(origin + direction * length, color);
             }
           }
         }
@@ -236,6 +230,7 @@ namespace ds2 {
     QVector<int> order;
     std::unique_ptr<QRhiBuffer> gizmos;
     quint32 gizmoVertexCount = 0;
+    quint32 gizmoLineCount = 0;
     QVector<float> sortDistances;
     QVector<LightGpu> lights;
     QVector<int> lightOrder;
@@ -431,6 +426,7 @@ namespace ds2 {
   }
 
   void RenderWidget::setScene(std::shared_ptr<Scene> scene) {
+    releaseMouseCapture();
     m_pending = std::move(scene);
     update();
   }
@@ -445,14 +441,246 @@ namespace ds2 {
       return;
     }
 
+    finishTranslation();
     m_selectedMeshes = std::move(meshes);
-    if (m_map && m_scene) {
+    rebuildSelectionGizmos();
+    update();
+  }
+
+  Bounds RenderWidget::selectionBounds() const {
+    auto result = m_scene->meshes[m_selectedMeshes.first()].bounds;
+    for (qsizetype i = 1; i < m_selectedMeshes.size(); ++i) {
+      const auto& box = m_scene->meshes[m_selectedMeshes[i]].bounds;
+      for (int axis = 0; axis < 3; ++axis) {
+        result.low[axis]  = std::min(result.low[axis], box.low[axis]);
+        result.high[axis] = std::max(result.high[axis], box.high[axis]);
+      }
+    }
+
+    return result;
+  }
+
+  void RenderWidget::rebuildSelectionGizmos() {
+    if (m_map && m_scene && !m_selectedMeshes.isEmpty()) {
       buildSelectionGizmos(*m_scene, m_selectedMeshes, m_selectionGizmos);
+      const auto box = selectionBounds();
+      m_gizmoOrigin = (box.low + box.high) * .5f;
     } else {
       m_selectionGizmos.clear();
     }
 
+    m_gizmoLineCount = m_selectionGizmos.size();
     m_gizmosDirty = true;
+    m_hoverAxis = -1;
+    if (m_dragAxis < 0 && !m_mouseCaptured) {
+      unsetCursor();
+    }
+  }
+
+  float RenderWidget::translationGizmoLength() const {
+    if (!m_map || !m_scene || m_selectedMeshes.isEmpty()) {
+      return 0;
+    }
+
+    const float depth = QVector3D::dotProduct(m_gizmoOrigin - camera.eye(), camera.forward());
+    return depth > .5f ? depth * (2 * std::tan(qDegreesToRadians(25.f)) * 96 / std::max(height(), 1)) : 0;
+  }
+
+  void RenderWidget::updateTranslationGizmo() {
+    const float length = translationGizmoLength();
+    const auto forward = camera.forward();
+    if (!m_gizmosDirty && length == m_gizmoLength && forward == m_gizmoForward) {
+      return;
+    }
+
+    m_gizmoLength = length;
+    m_gizmoForward = forward;
+    m_selectionGizmos.resize(m_gizmoLineCount);
+    if (length > 0) {
+      auto add = [this](const QVector3D& point, const QVector3D& color) {
+        auto& vertex = m_selectionGizmos.emplaceBack();
+        for (int axis = 0; axis < 3; ++axis) {
+          vertex.position[axis] = point[axis];
+          vertex.color[axis] = color[axis];
+        }
+      };
+      for (int axis = 0; axis < 3; ++axis) {
+        QVector3D direction;
+        direction[axis] = 1;
+        const auto side = QVector3D::crossProduct(direction, forward);
+        if (side.lengthSquared() < .04f) {
+          continue;
+        }
+
+        const auto width = side.normalized() * length;
+        const auto start = m_gizmoOrigin + direction * (length * .12f);
+        const auto neck = m_gizmoOrigin + direction * (length * .78f);
+        const auto tip = m_gizmoOrigin + direction * length;
+        const QVector3D color = axis == (m_dragAxis >= 0 ? m_dragAxis : m_hoverAxis) ? QVector3D(1.f, 1.f, .2f)
+                                                                                : QVector3D(axisColors[axis][0], axisColors[axis][1], axisColors[axis][2]);
+        add(start - width * .015f, color);
+        add(start + width * .015f, color);
+        add(neck + width * .015f, color);
+        add(start - width * .015f, color);
+        add(neck + width * .015f, color);
+        add(neck - width * .015f, color);
+        add(neck - width * .065f, color);
+        add(neck + width * .065f, color);
+        add(tip, color);
+      }
+    }
+
+    m_gizmosDirty = true;
+  }
+
+  int RenderWidget::gizmoAxisAt(const QPointF& position) const {
+    const float length = translationGizmoLength();
+    if (!showModels || length <= 0) {
+      return -1;
+    }
+
+    const auto clip = camera.clip(bounds(), float(width()) / std::max(height(), 1));
+    int result = -1;
+    double closest = 9 * 9;
+    for (int axis = 0; axis < 3; ++axis) {
+      QVector3D direction;
+      direction[axis] = 1;
+      if (QVector3D::crossProduct(direction, camera.forward()).lengthSquared() < .04f ||
+          QVector3D::dotProduct(m_gizmoOrigin + direction * length - camera.eye(), camera.forward()) <= .5f) {
+        continue;
+      }
+
+      const auto start = screenPoint(m_gizmoOrigin + direction * (length * .16f), clip, size());
+      const auto end = screenPoint(m_gizmoOrigin + direction * length, clip, size());
+      const auto segment = end - start;
+      const double squared = QPointF::dotProduct(segment, segment);
+      if (squared < 1) {
+        continue;
+      }
+
+      const double t = std::clamp(QPointF::dotProduct(position - start, segment) / squared, 0., 1.);
+      const auto delta = position - (start + segment * t);
+      const double distance = QPointF::dotProduct(delta, delta);
+      if (distance < closest) {
+        closest = distance;
+        result = axis;
+      }
+    }
+
+    return result;
+  }
+
+  bool RenderWidget::translationPosition(const QPointF& position, float& value) const {
+    const auto forward = camera.forward();
+    const auto right = QVector3D::crossProduct(forward, {0, 0, 1}).normalized();
+    const auto up = QVector3D::crossProduct(right, forward);
+    const float scale = std::tan(qDegreesToRadians(25.f));
+    const auto ray = forward + right * float((2 * position.x() - width()) / std::max(height(), 1) * scale) +
+                     up * float((height() - 2 * position.y()) / std::max(height(), 1) * scale);
+    const float denominator = QVector3D::dotProduct(ray, m_dragNormal);
+    if (std::abs(denominator) < .0001f) {
+      return false;
+    }
+
+    const float distance = QVector3D::dotProduct(m_dragOrigin - camera.eye(), m_dragNormal) / denominator;
+    if (distance <= 0) {
+      return false;
+    }
+
+    value = (camera.eye() + ray * distance - m_dragOrigin)[m_dragAxis];
+    return std::isfinite(value);
+  }
+
+  bool RenderWidget::beginTranslation(const QPointF& position) {
+    const int axis = gizmoAxisAt(position);
+    if (axis < 0) {
+      return false;
+    }
+
+    m_dragAxis = axis;
+    m_dragOrigin = m_gizmoOrigin;
+    m_dragNormal = camera.forward();
+    m_dragNormal[axis] = 0; // Plane contains the world axis and faces the camera as closely as possible.
+    m_dragNormal.normalize();
+    m_dragOffset = {};
+    if (!translationPosition(position, m_dragPosition)) {
+      m_dragAxis = -1;
+      return false;
+    }
+
+    m_gizmosDirty = true;
+    setCursor(Qt::SizeAllCursor);
+    grabMouse();
+    update();
+    return true;
+  }
+
+  void RenderWidget::translateSelection(const QVector3D& delta) {
+    if (delta.isNull()) {
+      return;
+    }
+
+    for (const int id : m_selectedMeshes) {
+      auto& mesh = m_scene->meshes[id];
+      mesh.transform.setColumn(3, mesh.transform.column(3) + QVector4D(delta, 0));
+      mesh.bounds.low += delta;
+      mesh.bounds.high += delta;
+      if (!m_scene->movedMeshes.contains(id)) {
+        m_scene->movedMeshes.append(id);
+      }
+
+      if (!m_dirtyMeshes.contains(id)) {
+        m_dirtyMeshes.append(id);
+      }
+
+      for (int axis = 0; axis < 3; ++axis) {
+        m_scene->bounds.low[axis] = std::min(m_scene->bounds.low[axis], mesh.bounds.low[axis]);
+        m_scene->bounds.high[axis] = std::max(m_scene->bounds.high[axis], mesh.bounds.high[axis]);
+      }
+    }
+
+    for (auto& model : m_scene->models) {
+      for (auto& instance : model.instances) {
+        if (std::any_of(instance.meshes.cbegin(), instance.meshes.cend(), [this](int id) {
+              return std::binary_search(m_selectedMeshes.cbegin(), m_selectedMeshes.cend(), id);
+            })) {
+          instance.transform.setColumn(3, instance.transform.column(3) + QVector4D(delta, 0));
+          instance.bounds.low += delta;
+          instance.bounds.high += delta;
+        }
+      }
+    }
+
+    m_poseBounds = m_scene->bounds;
+    rebuildSelectionGizmos();
+    update();
+  }
+
+  void RenderWidget::finishTranslation() {
+    if (m_dragAxis < 0) {
+      return;
+    }
+
+    m_dragAxis = -1;
+    m_hoverAxis = -1;
+    m_gizmosDirty = true;
+    if (m_scene && !m_scene->meshes.isEmpty()) {
+      auto box = m_scene->meshes.first().bounds;
+      for (const auto& mesh : m_scene->meshes) {
+        for (int axis = 0; axis < 3; ++axis) {
+          box.low[axis] = std::min(box.low[axis], mesh.bounds.low[axis]);
+          box.high[axis] = std::max(box.high[axis], mesh.bounds.high[axis]);
+        }
+      }
+
+      m_scene->bounds = m_poseBounds = box;
+    }
+
+    unsetCursor();
+    if (QWidget::mouseGrabber() == this) {
+      releaseMouse();
+    }
+
     update();
   }
 
@@ -475,16 +703,7 @@ namespace ds2 {
   void RenderWidget::fit() {
     if (m_scene) {
       const bool fitSelection = m_map && !m_selectedMeshes.isEmpty();
-      Bounds fitBounds = fitSelection ? m_scene->meshes[m_selectedMeshes.first()].bounds : bounds();
-      if (fitSelection) {
-        for (qsizetype i = 1; i < m_selectedMeshes.size(); ++i) {
-          const auto& meshBounds = m_scene->meshes[m_selectedMeshes[i]].bounds;
-          for (int axis = 0; axis < 3; ++axis) {
-            fitBounds.low[axis]  = std::min(fitBounds.low[axis], meshBounds.low[axis]);
-            fitBounds.high[axis] = std::max(fitBounds.high[axis], meshBounds.high[axis]);
-          }
-        }
-      }
+      const Bounds fitBounds = fitSelection ? selectionBounds() : bounds();
 
       camera.fit(fitBounds, float(width()) / std::max(height(), 1));
     }
@@ -810,8 +1029,11 @@ namespace ds2 {
         if (m_scene != m_pending) {
           m_selectedMeshes.clear();
           m_selectionGizmos.clear();
+          m_gizmoLineCount = 0;
+          m_hoverAxis = -1;
         }
 
+        m_dirtyMeshes.clear();
         m_scene = m_pending;
         m_pending.reset();
         m_paletteDirty = false;
@@ -854,6 +1076,14 @@ namespace ds2 {
           m_paletteDirty = false;
         }
 
+        for (const int id : m_dirtyMeshes) {
+          const auto& mesh = m_scene->meshes[id];
+          batch->updateDynamicBuffer(d.draw.get(), quint32(id * d.stride), 64, mesh.transform.constData());
+          d.meshes[id].center = (mesh.bounds.low + mesh.bounds.high) * .5f;
+        }
+
+        m_dirtyMeshes.clear();
+
         if (m_map) {
           visibleMeshes(*m_scene, camera.clip(b, aspect, true), d.order);
         } else {
@@ -861,6 +1091,7 @@ namespace ds2 {
           std::iota(d.order.begin(), d.order.end(), 0);
         }
 
+        updateTranslationGizmo();
         if (m_gizmosDirty) {
           const quint64 bytes = quint64(m_selectionGizmos.size()) * sizeof(Vertex);
           require(bytes <= std::numeric_limits<quint32>::max(), "Selection gizmos exceed GPU buffer limits");
@@ -877,6 +1108,7 @@ namespace ds2 {
           }
 
           d.gizmoVertexCount = quint32(m_selectionGizmos.size());
+          d.gizmoLineCount = quint32(m_gizmoLineCount);
           m_gizmosDirty = false;
         }
 
@@ -953,8 +1185,11 @@ namespace ds2 {
           d.pipeline(rhi(), m_target->pass.get(), mat, false, false, true, sampleCount());
         }
 
-        if (d.gizmoVertexCount) {
+        if (showModels && d.gizmoVertexCount) {
           d.pipeline(rhi(), m_target->pass.get(), gizmoMaterial(), false, false, true, sampleCount());
+          if (d.gizmoVertexCount > d.gizmoLineCount) {
+            d.pipeline(rhi(), m_target->pass.get(), gizmoMaterial(), false, false, false, sampleCount());
+          }
         }
       }
 
@@ -1015,13 +1250,19 @@ namespace ds2 {
           cb->draw(d.gridVertexCount);
         }
 
-        if (d.gizmoVertexCount) {
+        if (showModels && d.gizmoVertexCount) {
           cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(gizmoMaterial(), false, false, true)).get());
           const QRhiCommandBuffer::DynamicOffset offset(1, quint32((d.meshes.size() + d.lights.size()) * d.stride));
           cb->setShaderResources(d.gizmoBindings, 1, &offset);
           const QRhiCommandBuffer::VertexInput input(d.gizmos.get(), 0);
           cb->setVertexInput(0, 1, &input);
-          cb->draw(d.gizmoVertexCount);
+          cb->draw(d.gizmoLineCount);
+          if (d.gizmoVertexCount > d.gizmoLineCount) {
+            cb->setGraphicsPipeline(d.pipelines.at(d.pipelineKey(gizmoMaterial(), false, false, false)).get());
+            cb->setShaderResources(d.gizmoBindings, 1, &offset);
+            cb->setVertexInput(0, 1, &input);
+            cb->draw(d.gizmoVertexCount - d.gizmoLineCount, 1, d.gizmoLineCount);
+          }
         }
       }
 
@@ -1045,7 +1286,7 @@ namespace ds2 {
       return;
     }
 
-    bool dirty = camera.move(m_keys, float(dt));
+    bool dirty = m_dragAxis < 0 && camera.move(m_keys, float(dt));
     if (m_scene->animation) {
       try {
         if (m_scene->animation->update(dt)) {
@@ -1066,6 +1307,7 @@ namespace ds2 {
   }
 
   void RenderWidget::releaseMouseCapture() {
+    finishTranslation();
     m_buttons = {};
     if (!m_mouseCaptured) {
       return;
@@ -1090,11 +1332,16 @@ namespace ds2 {
       return;
     }
 
+    setFocus(Qt::MouseFocusReason);
+    if (m_dragAxis >= 0 || (m_map && !m_buttons && e->button() == Qt::LeftButton && beginTranslation(e->position()))) {
+      e->accept();
+      return;
+    }
+
 #ifdef Q_OS_WIN
     // Resolve the handle before grabMouse(), never while a grab is active.
     const auto hwnd = m_map ? reinterpret_cast<HWND>(winId()) : nullptr;
 #endif
-    setFocus(Qt::MouseFocusReason);
     const bool starting = !m_buttons;
     m_buttons |= e->button();
     if (starting) {
@@ -1127,6 +1374,15 @@ namespace ds2 {
   }
 
   void RenderWidget::mouseReleaseEvent(QMouseEvent* e) {
+    if (m_dragAxis >= 0) {
+      if (e->button() == Qt::LeftButton) {
+        finishTranslation();
+      }
+
+      e->accept();
+      return;
+    }
+
     m_buttons &= ~e->button();
     if (!m_buttons) {
       releaseMouseCapture();
@@ -1146,6 +1402,34 @@ namespace ds2 {
   }
 
   void RenderWidget::mouseMoveEvent(QMouseEvent* e) {
+    if (m_dragAxis >= 0) {
+      float position;
+      if (translationPosition(e->position(), position)) {
+        QVector3D offset;
+        offset[m_dragAxis] = position - m_dragPosition;
+        translateSelection(offset - m_dragOffset);
+        m_dragOffset = offset;
+      }
+
+      e->accept();
+      return;
+    }
+
+    if (m_map && !m_buttons) {
+      const int axis = gizmoAxisAt(e->position());
+      if (axis != m_hoverAxis) {
+        m_hoverAxis = axis;
+        m_gizmosDirty = true;
+        if (axis >= 0) {
+          setCursor(Qt::OpenHandCursor);
+        } else {
+          unsetCursor();
+        }
+
+        update();
+      }
+    }
+
 #ifdef Q_OS_WIN
     if (m_map && m_buttons) {
       return;
@@ -1158,7 +1442,7 @@ namespace ds2 {
   }
 
   void RenderWidget::wheelEvent(QWheelEvent* e) {
-    if (m_scene) {
+    if (m_scene && m_dragAxis < 0) {
       camera.wheel(e->angleDelta().y() / 120.f);
       update();
       if (changed) {
@@ -1170,6 +1454,16 @@ namespace ds2 {
   }
 
   void RenderWidget::keyPressEvent(QKeyEvent* e) {
+    if (m_dragAxis >= 0) {
+      if (e->key() == Qt::Key_Escape) {
+        translateSelection(-m_dragOffset);
+        finishTranslation();
+      }
+
+      e->accept();
+      return;
+    }
+
     m_keys.insert(e->key());
     if (!e->isAutoRepeat() && keyAction) {
       keyAction(e->key(), e->modifiers());
@@ -1193,9 +1487,21 @@ namespace ds2 {
   }
 
   bool RenderWidget::event(QEvent* e) {
+    if (e->type() == QEvent::ShortcutOverride && m_dragAxis >= 0) {
+      e->accept();
+      return true;
+    }
+
     if (e->type() == QEvent::WindowDeactivate || e->type() == QEvent::Hide || e->type() == QEvent::UngrabMouse || e->type() == QEvent::WinIdChange) {
       m_keys.clear();
       releaseMouseCapture();
+    }
+
+    if (e->type() == QEvent::Leave && m_dragAxis < 0 && m_hoverAxis >= 0) {
+      m_hoverAxis = -1;
+      m_gizmosDirty = true;
+      unsetCursor();
+      update();
     }
 
     return QRhiWidget::event(e);

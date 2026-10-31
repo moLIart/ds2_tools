@@ -107,6 +107,7 @@ namespace ds2 {
     QVector<Geometry> geometries;
     QVector<Mesh> meshes;
     QVector<VisNode> visibility;
+    QVector<int> movedMeshes; // Runtime edits: tested outside the original static visibility tree.
     QVector<Light> lights;
     QVector<MapModel> models;
     QVector<QVector2D> influences; // matrix index, raw weight; no normalization

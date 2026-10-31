@@ -1077,6 +1077,13 @@ namespace ds2 {
       generation = 1;
     }
 
+    for (const int id : scene.movedMeshes) {
+      stamps[id] = generation;
+      if (inFrustum(scene.meshes[id].bounds, planes)) {
+        result.append(id);
+      }
+    }
+
     pending.clear();
     pending.append(0);
     while (!pending.isEmpty()) {

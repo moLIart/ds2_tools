@@ -50,6 +50,13 @@ namespace ds2 {
     std::shared_ptr<Scene> m_pending, m_scene;
     QVector<int> m_selectedMeshes;
     QVector<Vertex> m_selectionGizmos;
+    qsizetype m_gizmoLineCount = 0;
+    QVector3D m_gizmoOrigin, m_gizmoForward;
+    float m_gizmoLength = 0;
+    int m_hoverAxis = -1, m_dragAxis = -1;
+    QVector3D m_dragOrigin, m_dragNormal, m_dragOffset;
+    float m_dragPosition = 0;
+    QVector<int> m_dirtyMeshes;
     bool m_map, m_paletteDirty = true, m_gizmosDirty = true;
     Bounds m_poseBounds;
     QSet<int> m_keys;
@@ -67,5 +74,14 @@ namespace ds2 {
     void tick();
     Bounds bounds(bool grid = false) const;
     void applyMouseDelta(float dx, float dy, Qt::KeyboardModifiers mods);
+    Bounds selectionBounds() const;
+    void rebuildSelectionGizmos();
+    float translationGizmoLength() const;
+    void updateTranslationGizmo();
+    int gizmoAxisAt(const QPointF& position) const;
+    bool beginTranslation(const QPointF& position);
+    bool translationPosition(const QPointF& position, float& value) const;
+    void translateSelection(const QVector3D& delta);
+    void finishTranslation();
   };
 } // namespace ds2

@@ -6,6 +6,7 @@ layout(location = 3) in vec2 lightUv;
 layout(location = 4) in vec4 color;
 layout(location = 5) in uvec2 influenceRange;
 
+// params.x: 0 combined, 1 albedo, 2 lightmap, 3 vertex colors, 4 mesh colors, 5 model.
 layout(std140, binding = 0) uniform Frame {
   mat4 mvp;
   vec4 light;
@@ -14,6 +15,14 @@ layout(std140, binding = 0) uniform Frame {
 
 frame;
 
+// Per-mesh DrawUniform from render_widget.cpp:
+// tintGain.rgb: color3 tint; tintGain.a: overbright/self-illumination gain.
+// meshCutoff.rgb: mesh debug color; meshCutoff.a: alpha-test cutoff.
+// flags.x bits: 1 use lightmap, 2 use vertex colors, 4 vertex colors present,
+//               8 flip albedo V, 16 flip lightmap V. Bits 2 and 4 must both be set
+//               for vertex colors to affect lighting and alpha.
+// flags.y: 1 draws solid tintGain.rgb and disables skinning (used by the grid).
+// flags.z/w: albedo/lightmap last mip indices; not used by this shader.
 layout(std140, binding = 1) uniform Draw {
   mat4 model;
   vec4 tintGain;

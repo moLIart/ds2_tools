@@ -1,0 +1,61 @@
+BasedOnStyle: LLVM
+Standard: Auto
+ColumnLimit: 180
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+
+# Braces
+BreakBeforeBraces: Attach
+InsertBraces: true
+
+# Alignment
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: None
+AlignOperands: Align
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+
+# Pointers & references
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Includes
+SortIncludes: CaseInsensitive
+IncludeBlocks: Preserve
+
+# Spacing
+SpaceBeforeParens: ControlStatements
+SpaceAfterCStyleCast: false
+SpaceInEmptyBlock: false
+SpacesInParens: Never
+
+# Line breaks
+# Separate definitions with a blank line; this does not affect control-flow blocks.
+SeparateDefinitionBlocks: Always
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+LambdaBodyIndentation: OuterScope
+BreakBeforeTernaryOperators: true
+BinPackParameters: BinPack
+BinPackArguments: true
+
+# Namespaces
+NamespaceIndentation: All
+
+# Templates
+AlwaysBreakTemplateDeclarations: Yes
+
+# Modern C++
+SpaceBeforeCpp11BracedList: false
+Cpp11BracedListStyle: true
+
+# Preprocessor
+IndentPPDirectives: BeforeHash
+
+# Misc
+InsertNewlineAtEOF: true
+

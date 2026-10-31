@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
     format.setSwapInterval(1);
     QSurfaceFormat::setDefaultFormat(format);
     QApplication app(argc, argv);
+    QApplication::setStyle(QStringLiteral("Fusion"));
     QApplication::setApplicationName(map ? "ds2_view" : "ds2md_view");
     QApplication::setApplicationVersion("1.0");
     QCommandLineParser parser;

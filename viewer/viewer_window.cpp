@@ -110,8 +110,16 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         m_export->setEnabled(false);
     }
     if (map) {
-        action("< Map", QKeySequence("["), [this] { changeMap(-1); });
-        action("Map >", QKeySequence("]"), [this] { changeMap(1); });
+        m_toolbar->addWidget(new QLabel(QStringLiteral("Map: "), m_toolbar));
+        m_maps = new QComboBox(m_toolbar);
+        m_maps->setObjectName(QStringLiteral("mapSelection"));
+        m_maps->setAccessibleName(QStringLiteral("Map"));
+        m_maps->setPlaceholderText(QStringLiteral("Select map"));
+        m_maps->setMinimumContentsLength(20);
+        m_maps->setMaximumWidth(300);
+        m_toolbar->addWidget(m_maps);
+        connect(m_maps, &QComboBox::activated, this,
+                [this](int index) { load(m_maps->itemData(index).toString()); });
     }
     action("Fit", QKeySequence(map ? "Home" : "F"), [this] { m_view->fit(); });
     m_wire = action(
@@ -179,11 +187,15 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
         connect(up, &QAction::triggered, this, [distance] { distance(1.25f); });
         connect(down, &QAction::triggered, this, [distance] { distance(.8f); });
         connect(automatic, &QAction::triggered, this, [this] { m_distance->setValue(0); });
-        QDirIterator it(QDir(root).filePath("gameres/maps"), {"*.ds2"}, QDir::Files,
-                        QDirIterator::Subdirectories);
+        const QDir mapsDir(QDir(root).filePath(QStringLiteral("gameres/maps")));
+        QStringList maps;
+        QDirIterator it(mapsDir.path(), {"*.ds2"}, QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext())
-            m_maps.append(QFileInfo(it.next()).absoluteFilePath());
-        m_maps.sort();
+            maps.append(QFileInfo(it.next()).absoluteFilePath());
+        maps.sort();
+        for (const auto &mapPath : maps)
+            m_maps->addItem(mapsDir.relativeFilePath(mapPath), mapPath);
+        m_maps->setCurrentIndex(-1);
     } else {
         auto *grid = action(
             "Grid", QKeySequence("G"),
@@ -246,7 +258,7 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
             this, "Controls",
             m_map ? "LMB orbit | MMB pan | Wheel zoom/speed | RMB fly-look\nF fly/orbit | WASD, Q/E move | "
                     "Shift fast\n1 combined | 2 albedo | 3 lightmap | 4 vertex colors | 5 mesh colors\nG "
-                    "wireframe | Home fit | [ / ] maps | Ctrl+O open\nPgUp/PgDown draw distance | End "
+                    "wireframe | Home fit | Map list select | Ctrl+O open\nPgUp/PgDown draw distance | End "
                     "automatic | Esc close"
                   : "LMB orbit | Shift+LMB light | RMB/MMB pan | Wheel zoom\nF fit | L reset light | W "
                     "wireframe | G grid | Ctrl+O open | Ctrl+Shift+E export GLB\nSpace play/pause | [ / ] clips | B bind/stored "
@@ -326,6 +338,15 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
                                                                           .arg(scene->warnings.first())));
         for (const auto &w : scene->warnings)
             qWarning().noquote() << QFileInfo(scene->path).fileName() + ": " + w;
+        if (m_maps) {
+            int index = m_maps->findData(scene->path);
+            if (index < 0) {
+                const QDir mapsDir(QDir(m_root).filePath(QStringLiteral("gameres/maps")));
+                m_maps->addItem(mapsDir.relativeFilePath(scene->path), scene->path);
+                index = m_maps->count() - 1;
+            }
+            m_maps->setCurrentIndex(index);
+        }
         if (m_clips) {
             QSignalBlocker blocker(m_clips);
             m_clips->clear();
@@ -360,12 +381,16 @@ ViewerWindow::ViewerWindow(bool map, const QString &root, const QString &path, i
     uiTimer->start();
     if (!path.isEmpty())
         load(path);
-    else if (map && !m_maps.isEmpty())
-        load(m_maps.first());
+    else if (m_maps && m_maps->count() > 0)
+        load(m_maps->itemData(0).toString());
 }
 void ViewerWindow::error(const QString &message) {
     qCritical().noquote() << message;
     statusBar()->showMessage("Error: " + message);
+    if (m_maps) {
+        const auto &scene = m_view->scene();
+        m_maps->setCurrentIndex(scene ? m_maps->findData(scene->path) : -1);
+    }
     if (!m_screenshot.isEmpty())
         QTimer::singleShot(0, [] { QApplication::exit(1); });
 }
@@ -393,15 +418,6 @@ void ViewerWindow::open() {
     if (!path.isEmpty())
         load(path);
     m_view->setFocus();
-}
-void ViewerWindow::changeMap(int delta) {
-    if (m_maps.isEmpty())
-        return;
-    const auto scene = m_view->scene();
-    int i = scene ? m_maps.indexOf(scene->path) : 0;
-    if (i < 0)
-        i = 0;
-    load(m_maps[(i + delta + m_maps.size()) % m_maps.size()]);
 }
 void ViewerWindow::exportModelGlb() {
     const auto scene = m_view->scene();

@@ -3,11 +3,25 @@ layout(location=0) in vec2 albedoUv;
 layout(location=1) in vec2 lmUv;
 layout(location=2) in vec4 vertexColor;
 layout(location=3) in vec3 surfaceNormal;
-layout(std140,binding=0) uniform Frame { mat4 mvp; vec4 light; ivec4 params; } frame;
-layout(std140,binding=1) uniform Draw { mat4 model; vec4 tintGain; vec4 meshCutoff; ivec4 flags; } draw;
+
+layout(std140,binding=0) uniform Frame { 
+	mat4 mvp; 
+	vec4 light; 
+	ivec4 params; 
+} frame;
+
+layout(std140,binding=1) uniform Draw { 
+	mat4 model; 
+	vec4 tintGain; 
+	vec4 meshCutoff; 
+	ivec4 flags; 
+} draw;
+
 layout(binding=2) uniform sampler2D albedo;
 layout(binding=3) uniform sampler2D lightmap;
+
 layout(location=0) out vec4 fragColor;
+
 // QRhi has no anisotropy sampler setting. Integrate up to 16 samples along
 // the major footprint, retaining trilinear mip filtering along the minor axis.
 vec4 filtered(sampler2D tex,vec2 uv,int lastMip) {
@@ -21,7 +35,10 @@ vec4 filtered(sampler2D tex,vec2 uv,int lastMip) {
     return sum/float(taps);
 }
 void main() {
-    if(draw.flags.y==1){fragColor=vec4(draw.tintGain.rgb,1);return;}
+    if(draw.flags.y == 1){
+		fragColor = vec4(draw.tintGain.rgb,1);
+		return;
+	}
     int mode=frame.params.x,flags=draw.flags.x;
     if(mode==4){fragColor=vec4(draw.meshCutoff.rgb,1);return;}
     vec2 uv=vec2(albedoUv.x,(flags&8)!=0?1-albedoUv.y:albedoUv.y);

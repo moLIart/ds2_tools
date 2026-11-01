@@ -35,10 +35,17 @@ namespace ds2 {
   };
   enum class Blend { None, Alpha, Add, Modulate, Replace };
 
+  struct TextureTransform {
+    enum class Type { None, Scroll, Rotate };
+    Type type = Type::None;
+    QVector2D rate;
+  };
+
   struct Material {
     QString name;
     QString albedo = "$missing$", lightmap = "$white$";
     QVector3D tint{1, 1, 1};
+    TextureTransform diffuseTransform;
     Blend blend = Blend::None;
     float sort = 0, alphaCutoff = -1, gain = 1;
     bool cull = false, depthTest = true, depthWrite = true, depthOffset = false;

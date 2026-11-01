@@ -1,3 +1,4 @@
+#include "material.h"
 #include "scene.h"
 
 #include <algorithm>
@@ -11,7 +12,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
-#include <QRegularExpression>
 #include <QSet>
 #include <QtEndian>
 #include <stdexcept>
@@ -577,161 +577,6 @@ namespace ds2 {
       return bindings;
     }
 
-    struct Declaration {
-      QString name, shader = "unknown", diffuse = "$diffuse$", blend;
-      QVector3D color{1, 1, 1};
-      bool vertexColors = false, selfIllumination = false, overbright = true;
-      bool cull = true, depthWrite = true, depthTest = true, depthOffset = false;
-      bool clamp = false, uvTransform = false;
-      float alphaCutoff = -1;
-      int sort          = 5;
-    };
-
-    using Fields = QHash<QString, QStringList>;
-
-    Fields fields(const QStringList& tokens, qsizetype start, qsizetype end) {
-      Fields result;
-      qsizetype i = start;
-      while (i + 1 < end) {
-        const QString name  = tokens[i++].toCaseFolded();
-        const QString value = tokens[i++];
-        QStringList group;
-        if (value == "{") {
-          int depth = 1;
-          while (i < end && depth) {
-            const QString token = tokens[i++];
-            depth += (token == "{") - (token == "}");
-            if (depth) {
-              group.append(token);
-            }
-          }
-        } else {
-          group.append(value);
-        }
-
-        result.insert(name, group);
-      }
-
-      return result;
-    }
-
-    QString unquote(QString text) {
-      while (text.startsWith('"')) {
-        text.remove(0, 1);
-      }
-
-      while (text.endsWith('"')) {
-        text.chop(1);
-      }
-
-      return text;
-    }
-
-    float materialFloat(const QString& text, const QString& path) {
-      bool ok           = false;
-      const float value = text.toFloat(&ok);
-      if (!ok || !std::isfinite(value)) {
-        fail(QString("Invalid material number '%1' in %2").arg(text, path));
-      }
-
-      return value;
-    }
-
-    QHash<QString, Declaration> readMaterials(const QString& directory) {
-      QHash<QString, Declaration> result;
-      const auto paths = QDir(directory).entryInfoList({"*.mat"}, QDir::Files, QDir::Name | QDir::IgnoreCase);
-      const QRegularExpression comments("/\\*.*?(?:\\*/|\\z)|//[^\\r\\n]*", QRegularExpression::DotMatchesEverythingOption);
-      const QRegularExpression tokenizer("\"[^\"]*\"|[{}]|[^\\s{}]+");
-      for (const auto& path : paths) {
-        QFile file(path.absoluteFilePath());
-        if (!file.open(QIODevice::ReadOnly)) {
-          fail(QString("Cannot read material %1: %2").arg(path.absoluteFilePath(), file.errorString()));
-        }
-
-        const auto bytes = file.readAll();
-        if (file.error() != QFileDevice::NoError) {
-          fail(QString("Cannot read material %1: %2").arg(path.absoluteFilePath(), file.errorString()));
-        }
-
-        QString text = decode1251(bytes.constData(), bytes.size());
-        text.remove(comments);
-        QStringList tokens;
-        auto matches = tokenizer.globalMatch(text);
-        while (matches.hasNext()) {
-          tokens.append(matches.next().captured());
-        }
-
-        qsizetype i = 0;
-        while (i + 2 < tokens.size()) {
-          if (tokens[i].toCaseFolded() != "template_material" || tokens[i + 2] != "{") {
-            ++i;
-            continue;
-          }
-
-          Declaration d;
-          d.name = tokens[i + 1];
-          i += 3;
-          const auto start = i;
-          int depth        = 1;
-          while (i < tokens.size() && depth) {
-            const auto& token = tokens[i++];
-            depth += (token == "{") - (token == "}");
-          }
-
-          const auto f      = fields(tokens, start, i - 1);
-          const auto scalar = [&](const QString& key, const QString& fallback = QString()) {
-            const auto it = f.constFind(key);
-            if (it == f.cend()) {
-              return fallback;
-            }
-
-            if (it->isEmpty()) {
-              fail(QString("Empty material field '%1' in %2").arg(key, path.absoluteFilePath()));
-            }
-
-            return unquote(it->first()).toCaseFolded();
-          };
-          d.shader           = scalar("material", "unknown");
-          d.vertexColors     = scalar("use_vertex_colors") == "true" || scalar("color") == "vertex";
-          d.selfIllumination = scalar("self_illumination") == "true";
-          d.overbright       = scalar("overbright", "true") != "false";
-          d.blend            = scalar("blend");
-          d.cull             = scalar("cull_face") != "disable";
-          d.depthWrite       = scalar("depth_write") != "false" && scalar("depth_write") != "disable";
-          d.depthTest        = scalar("depth_test") != "disable";
-          d.depthOffset      = scalar("depth_offset") == "true";
-          bool sortOk        = false;
-          d.sort             = scalar("sort_value", "5").toInt(&sortOk);
-          if (!sortOk) {
-            fail(QString("Invalid sort_value in %1").arg(path.absoluteFilePath()));
-          }
-
-          const auto alpha = f.value("alphatest");
-          if (alpha.size() >= 2 && alpha[0] == "greater") {
-            d.alphaCutoff = materialFloat(alpha[1], path.absoluteFilePath());
-          }
-
-          const auto color = f.value("color3", {"1", "1", "1"});
-          if (color.size() < 3) {
-            fail(QString("Incomplete color3 in %1").arg(path.absoluteFilePath()));
-          }
-
-          d.color = {materialFloat(color[0], path.absoluteFilePath()), materialFloat(color[1], path.absoluteFilePath()), materialFloat(color[2], path.absoluteFilePath())};
-          const auto diffuse = f.value("diffuse_texture", {"$white$"});
-          if (diffuse.isEmpty()) {
-            fail(QString("Empty diffuse_texture in %1").arg(path.absoluteFilePath()));
-          }
-
-          d.diffuse     = unquote(diffuse[0]);
-          d.clamp       = diffuse.contains("clampmap");
-          d.uvTransform = f.contains("diffuse_texture_transform");
-          result.insert(d.name.toCaseFolded(), std::move(d));
-        }
-      }
-
-      return result;
-    }
-
     class TextureIndex {
       QHash<QString, QStringList> images;
 
@@ -807,10 +652,10 @@ namespace ds2 {
     };
 
     struct MapResources {
-      QHash<QString, Declaration> materials;
+      QHash<QString, MaterialDeclaration> materials;
       TextureIndex textures;
 
-      explicit MapResources(const QString& root) : materials(readMaterials(QDir(root).filePath("gameres/materials"))), textures(QDir(root).filePath("gameres/textures")) {}
+      explicit MapResources(const QString& root) : materials(cachedMaterials(QDir(root).filePath("gameres/materials"))), textures(QDir(root).filePath("gameres/textures")) {}
     };
 
     MapResources& resourcesFor(const QString& gameRoot) {
@@ -923,7 +768,7 @@ namespace ds2 {
       const auto materialName = source.material.toCaseFolded();
       auto declaration        = materials.constFind(materialName);
       if (declaration == materials.cend()) {
-        Declaration fallback;
+        MaterialDeclaration fallback;
         fallback.name = source.material;
         scene.warnings.append(QString("Undefined material '%1': showing static texture only").arg(source.material));
         materials.insert(materialName, fallback);
@@ -939,10 +784,6 @@ namespace ds2 {
       if (d.shader == "envmap" || d.shader == "embm" || d.shader == "space_distortion" || d.shader == "flare" || materialName.contains("refl") ||
           materialName.startsWith("cubeman")) {
         scene.warnings.append(QString("%1: static albedo/lighting only; reflection/distortion/flare effects not reproduced").arg(source.material));
-      }
-
-      if (d.uvTransform) {
-        scene.warnings.append(QString("%1: stored UVs shown without material UV animation/transform").arg(source.material));
       }
 
       const uint32_t colorBuffer = source.colorBuffer == absent ? source.vertexBuffer : source.colorBuffer;
@@ -997,6 +838,7 @@ namespace ds2 {
       m.albedo      = albedos.value(reference);
       m.flipAlbedo  = QFileInfo(m.albedo).suffix().toCaseFolded() == "tga";
       m.tint        = d.color;
+      m.diffuseTransform = d.diffuseTransform;
       m.alphaCutoff = d.alphaCutoff;
       m.sort        = float(d.sort);
       m.cull        = d.cull;

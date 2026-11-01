@@ -211,6 +211,10 @@ namespace ds2 {
                          "features are not represented; materials use the viewer's opaque model appearance.");
         }
 
+        if (material.diffuseTransform.type != TextureTransform::Type::None && !material.diffuseTransform.rate.isNull()) {
+          warn(document, "Diffuse texture animation is not represented in GLB; UVs are exported at time zero.");
+        }
+
         const QJsonObject pbr{{"baseColorFactor", tint}, {"baseColorTexture", QJsonObject{{"index", texture(material)}}}, {"metallicFactor", 0}, {"roughnessFactor", 1}};
         const int index = int(document.materials.size());
         document.materials.append(QJsonObject{{"name", material.name}, {"pbrMetallicRoughness", pbr}, {"alphaMode", "OPAQUE"}, {"doubleSided", !material.cull}});

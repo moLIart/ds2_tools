@@ -65,7 +65,7 @@ namespace ds2 {
     QPointF m_last;
     QPoint m_restoreCursor;
     QElapsedTimer m_clock, m_fpsClock;
-    qint64 m_lastTick = 0;
+    qint64 m_lastTick = 0, m_textureStart = 0;
     int m_frames      = 0;
     double m_fps      = 0;
     struct Target;

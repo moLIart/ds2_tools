@@ -2,6 +2,7 @@
 #include "texture.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -48,14 +49,42 @@ namespace ds2 {
       int params[4];
     };
 
+    struct TextureUniform {
+      float u[4] = {1, 0, 0, 0};
+      float v[4] = {0, 1, 0, 0};
+    };
+
+    TextureUniform textureUniform(const TextureTransform& transform, double milliseconds) {
+      // Engine texture matrices use milliseconds and a signed 100-UV scroll period.
+      TextureUniform result;
+      if (transform.type == TextureTransform::Type::Scroll) {
+        result.u[2] = float(std::fmod(milliseconds * transform.rate.x(), 100.0));
+        result.v[2] = float(std::fmod(milliseconds * transform.rate.y(), 100.0));
+      } else if (transform.type == TextureTransform::Type::Rotate) {
+        // OpenGL rotates source UVs around (0.5, -0.5), before image-origin correction.
+        constexpr double radians = 3.14159265358979323846 / 180.0;
+        const double angle = std::fmod(milliseconds * transform.rate.x(), 360.0) * radians;
+        const float c = float(std::cos(angle)), s = float(std::sin(angle));
+        result.u[0] = c;
+        result.u[1] = -s;
+        result.u[2] = .5f - .5f * c - .5f * s;
+        result.v[0] = s;
+        result.v[1] = c;
+        result.v[2] = -.5f - .5f * s + .5f * c;
+      }
+
+      return result;
+    }
+
     struct DrawUniform {
       float model[16];
       float tintGain[4];
       float meshCutoff[4];
       int flags[4];
+      TextureUniform diffuse;
     };
 
-    static_assert(sizeof(FrameUniform) == 96 && sizeof(DrawUniform) == 112);
+    static_assert(sizeof(FrameUniform) == 96 && sizeof(DrawUniform) == 144);
 
     QSize dataSize(qsizetype count) {
       const int w = int(std::min<qsizetype>(std::max<qsizetype>(1, count), 1024));
@@ -225,6 +254,13 @@ namespace ds2 {
     struct LightGpu {
       quint32 vertexOffset, indexStart, indexCount;
     };
+
+    struct TextureAnimation {
+      TextureTransform transform;
+      QVector<int> meshes;
+    };
+
+    QVector<TextureAnimation> textureAnimations;
 
     QVector<MeshGpu> meshes;
     QVector<int> order;
@@ -940,6 +976,19 @@ namespace ds2 {
           u.meshCutoff[3]    = mat.alphaCutoff;
           u.flags[0] =
               (mat.useLightmap ? 1 : 0) | (mat.useColors ? 2 : 0) | (d->scene->geometries[m.geometry].hasColors ? 4 : 0) | (mat.flipAlbedo ? 8 : 0) | (mat.flipLightmap ? 16 : 0);
+          if (mat.diffuseTransform.type != TextureTransform::Type::None && !mat.diffuseTransform.rate.isNull()) {
+            u.flags[0] |= 32;
+            auto animation = std::find_if(d->textureAnimations.begin(), d->textureAnimations.end(), [&](const auto& value) {
+              return value.transform.type == mat.diffuseTransform.type && value.transform.rate == mat.diffuseTransform.rate;
+            });
+            if (animation == d->textureAnimations.end()) {
+              d->textureAnimations.append({mat.diffuseTransform, {}});
+              animation = d->textureAnimations.end() - 1;
+            }
+
+            animation->meshes.append(int(i));
+          }
+
           u.flags[2] = d->lastMip(mat.albedo);
           u.flags[3] = d->lastMip(mat.lightmap);
           std::memcpy(uniforms.data() + i * d->stride, &u, sizeof(u));
@@ -1028,6 +1077,7 @@ namespace ds2 {
         m_data  = std::move(d);
         if (m_scene != m_pending) {
           m_selectedMeshes.clear();
+          m_textureStart = m_clock.nsecsElapsed();
           m_selectionGizmos.clear();
           m_gizmoLineCount = 0;
           m_hoverAxis = -1;
@@ -1083,6 +1133,14 @@ namespace ds2 {
         }
 
         m_dirtyMeshes.clear();
+
+        const double textureMilliseconds = double(m_clock.nsecsElapsed() - m_textureStart) / 1e6;
+        for (const auto& animation : d.textureAnimations) {
+          const auto texture = textureUniform(animation.transform, textureMilliseconds);
+          for (const int id : animation.meshes) {
+            batch->updateDynamicBuffer(d.draw.get(), quint32(id * d.stride + offsetof(DrawUniform, diffuse)), sizeof(texture), &texture);
+          }
+        }
 
         if (m_map) {
           visibleMeshes(*m_scene, camera.clip(b, aspect, true), d.order);
@@ -1301,7 +1359,7 @@ namespace ds2 {
       }
     }
 
-    if (m_map || dirty) {
+    if (m_map || dirty || (m_data && !m_data->textureAnimations.isEmpty())) {
       update();
     }
   }

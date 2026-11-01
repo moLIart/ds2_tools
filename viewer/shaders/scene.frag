@@ -17,8 +17,8 @@ frame;
 // tintGain.rgb: color3 tint; tintGain.a: lighting gain, or alpha for solid draws.
 // meshCutoff.rgb: mesh debug color; meshCutoff.a: alpha-test cutoff.
 // flags.x bits: 1 use lightmap, 2 use vertex colors, 4 vertex colors present,
-//               8 flip albedo V, 16 flip lightmap V. Bits 2 and 4 must both be set
-//               for vertex colors to affect lighting and alpha.
+//               8 flip albedo V, 16 flip lightmap V, 32 animate diffuse UV.
+//               Bits 2 and 4 must both be set for vertex colors to affect lighting and alpha.
 // flags.y: 1 solid tintGain, 2 vertex colors for gizmos; both disable skinning.
 // flags.z/w: albedo/lightmap last mip indices; not used by this shader.
 layout(std140, binding = 1) uniform Draw {
@@ -26,6 +26,8 @@ layout(std140, binding = 1) uniform Draw {
   vec4 tintGain;
   vec4 meshCutoff;
   ivec4 flags;
+  vec4 diffuseU;
+  vec4 diffuseV;
 }
 
 draw;

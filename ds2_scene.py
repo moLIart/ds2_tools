@@ -14,6 +14,12 @@ from inspect_ds2 import parse_map
 
 
 @dataclass(frozen=True, slots=True)
+class TextureTransform:
+    kind: str = ''
+    rate: tuple = (0.0, 0.0)
+
+
+@dataclass(frozen=True, slots=True)
 class Material:
     name: str
     shader: str = 'unknown'
@@ -31,7 +37,7 @@ class Material:
     color: tuple = (1.0, 1.0, 1.0)
     diffuse: str = '$diffuse$'
     clamp: bool = False
-    uv_transform: bool = False
+    uv_transform: TextureTransform = TextureTransform()
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,9 +140,15 @@ def _fields(tokens):
     """Return only depth-one fields; nested texture/compiler/animation data stay grouped."""
     fields = {}
     i = 0
-    while i + 1 < len(tokens):
-        name, value = tokens[i:i + 2]
-        i += 2
+    while i < len(tokens):
+        name = tokens[i]
+        i += 1
+        if i == len(tokens):
+            if name.casefold() == 'diffuse_texture_transform':
+                fields[name.casefold()] = []
+            break
+        value = tokens[i]
+        i += 1
         if value == '{':
             depth, group = 1, []
             while i < len(tokens) and depth:
@@ -149,6 +161,24 @@ def _fields(tokens):
         else:
             fields[name.casefold()] = [value]
     return fields
+
+
+def _texture_transform(tokens, path, material):
+    if tokens is None:
+        return TextureTransform()
+    kind = tokens[0].strip('"').casefold() if tokens else ''
+    count = {'scroll': 2, 'rotate': 1}.get(kind)
+    context = f'diffuse_texture_transform in {path} ({material})'
+    if count is None or len(tokens) < count + 1:
+        raise ValueError(f'Invalid {context}: expected scroll U V or rotate speed')
+    try:
+        rate = tuple(float(value) for value in tokens[1:count + 1])
+    except ValueError as error:
+        raise ValueError(f'Invalid number in {context}') from error
+    if not all(math.isfinite(value) and abs(value) <= 3.4028234663852886e38 for value in rate):
+        raise ValueError(f'Non-finite or out-of-range number in {context}')
+    # The engine reads only the first rotate parameter, even if more are present.
+    return TextureTransform(kind, rate if count == 2 else (rate[0], 0.0))
 
 
 def read_materials(directory):
@@ -188,7 +218,7 @@ def read_materials(directory):
                 depth_offset=scalar('depth_offset') == 'true',
                 sort=int(scalar('sort_value', '5')), color=tuple(map(float, color[:3])),
                 diffuse=diffuse[0].strip('"'), clamp='clampmap' in diffuse,
-                uv_transform='diffuse_texture_transform' in fields)
+                uv_transform=_texture_transform(fields.get('diffuse_texture_transform'), path, name))
     return materials
 
 
@@ -240,8 +270,6 @@ def load_map_scene(path, texture_index=None, materials=None):
                     raise ValueError('Instance color range outside color buffer')
         if material.shader in ('envmap', 'embm', 'space_distortion', 'flare') or 'refl' in name or name.startswith('cubeman'):
             warnings.append(f'{mesh["material"]}: static albedo/lighting only; reflection/distortion/flare effects not reproduced')
-        if material.uv_transform:
-            warnings.append(f'{mesh["material"]}: stored UVs shown without material UV animation/transform')
     lightmaps = []
     for reference in metadata['lightmaps']:
         resolved, warning = texture_index.resolve(reference, path.parent)

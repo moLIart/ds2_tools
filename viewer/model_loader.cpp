@@ -1,3 +1,4 @@
+#include "material.h"
 #include "model_animation.h"
 #include "scene.h"
 
@@ -345,6 +346,7 @@ namespace ds2 {
       Scene result;
       model::AnimationData animation;
       const TextureIndex& textures;
+      const QHash<QString, MaterialDeclaration>& materials;
       bool hasSkeleton = false, anyVertex = false;
       quint64 triangleCount                = 0;
       quint32 renderedMeshCount            = 0;
@@ -393,6 +395,11 @@ namespace ds2 {
         mesh.geometry        = int(result.geometries.size());
         mesh.indices         = std::move(indices);
         mesh.material.name   = material;
+        const auto declaration = materials.constFind(material.toCaseFolded());
+        if (declaration != materials.cend()) {
+          mesh.material.diffuseTransform = declaration->diffuseTransform;
+        }
+
         const QString albedo = textures.resolve(reference, mesh.name, result.warnings);
         if (albedo.isEmpty()) {
           mesh.material.albedo = "$white$";
@@ -746,7 +753,8 @@ namespace ds2 {
       }
 
     public:
-      Loader(Reader& reader, const QString& path, const QString& root) : r(reader), textures(textureIndex(root)) {
+      Loader(Reader& reader, const QString& path, const QString& root)
+          : r(reader), textures(textureIndex(root)), materials(cachedMaterials(QDir(root).filePath("gameres/materials"))) {
         result.path = QFileInfo(path).absoluteFilePath();
         result.name = QFileInfo(path).completeBaseName();
       }

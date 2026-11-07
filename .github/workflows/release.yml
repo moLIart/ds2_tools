@@ -29,6 +29,11 @@ jobs:
           tools: 'tools_ninja'
           cache: true
 
+      - name: Configure MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Build and install
         shell: pwsh
         run: |

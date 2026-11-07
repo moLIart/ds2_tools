@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.0'
+          arch: 'win64_msvc2022_64'
+          modules: 'qtshadertools'
+          tools: 'tools_ninja'
+          cache: true
+
+      - name: Build and install
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+          cmake --build build --config Release
+          cmake --install build --config Release --prefix install
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'install/*' -DestinationPath "ds2-tools-$env:GITHUB_REF_NAME-windows-x64.zip" -Force
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: "ds2-tools-${{ github.ref_name }}-windows-x64.zip"
+          fail_on_unmatched_files: true
+          generate_release_notes: true

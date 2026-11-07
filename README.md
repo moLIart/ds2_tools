@@ -63,6 +63,18 @@
 
 По умолчанию файлы копируются в `install/`. Другой каталог задаётся через `-Prefix`.
 
+## Автоматическая сборка релиза
+
+GitHub Actions собирает Windows x64 Release и публикует ZIP с обоими viewer и Qt runtime при отправке тега версии (`v*` или `X.Y.Z`):
+
+```powershell
+$version = 'vX.Y.Z' # Замените на тег нужной версии.
+git tag $version
+git push origin $version
+```
+
+После завершения workflow готовый архив появится на странице **Releases** репозитория. Workflow описан в [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
 ## Использование viewer
 
 Запуск с автоматическим поиском каталога `gameres` относительно открытого файла, текущего каталога или каталога программы:

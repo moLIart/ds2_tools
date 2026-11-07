@@ -1,8 +1,8 @@
 """Inspect DS2GeometryFile_1 0.8 maps, without third-party dependencies.
 
-Run: python ds2_research/inspect_ds2.py FILE_OR_DIRECTORY [--meshes]
+Run: python -m ds2_research.inspect_ds2 FILE_OR_DIRECTORY [--meshes]
 Offsets point into the original bytes. Unknown semantics retain memory-field
-names from ds2render.dll instead of speculative labels. See DS2_RESEARCH.md.
+names from ds2render.dll instead of speculative labels. See docs/ds2.md.
 """
 
 from collections import Counter
@@ -12,7 +12,10 @@ import json
 import math
 import struct
 
-from inspect_ds2md import Reader, UnsupportedVersion
+if __package__:
+    from .inspect_ds2md import Reader, UnsupportedVersion
+else:
+    from inspect_ds2md import Reader, UnsupportedVersion
 
 
 # Disk order is NOT numerical bit order. Colors are four u32 channels on disk.

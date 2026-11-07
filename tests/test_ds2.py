@@ -5,8 +5,8 @@ import struct
 from tempfile import TemporaryDirectory
 import unittest
 
-from inspect_ds2 import parse_map
-from ds2_scene import read_materials
+from ds2_research.ds2_scene import read_materials
+from ds2_research.inspect_ds2 import parse_map
 
 
 def string(value):

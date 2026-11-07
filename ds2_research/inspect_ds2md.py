@@ -1,6 +1,6 @@
 """Inspect DS2MD text 0.5 and binary 0.6/0.9/1.0; no third-party dependencies.
 
-Usage: python ds2_research/inspect_ds2md.py FILE_OR_DIRECTORY
+Usage: python -m ds2_research.inspect_ds2md FILE_OR_DIRECTORY
 A file emits decoded metadata and byte offsets as JSON. A directory recursively
 checks .ds2md files; failures exit with 1. DSMO packed/cache is not supported.
 The report omits decoded geometry and sampled matrix arrays.

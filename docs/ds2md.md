@@ -25,7 +25,7 @@
 
 ### Бинарный 0.6
 
-Пример: [gameres/models/krovat.ds2md](../gameres/models/krovat.ds2md).
+Пример: `gameres/models/krovat.ds2md` (файл игры в репозиторий не входит).
 
 | Смещение | Байты | Интерпретация |
 |---:|---|---|
@@ -111,7 +111,7 @@ EOF
 
 ### Текстовый 0.5
 
-Пример: [gameres/models/sky/sky_333.ds2md](../gameres/models/sky/sky_333.ds2md). Первые две строки файла буквально содержат:
+Пример: `gameres/models/sky/sky_333.ds2md` (файл игры в репозиторий не входит). Первые две строки файла буквально содержат:
 
 ```text
 "DS2ModelFile_1"
@@ -538,7 +538,7 @@ Reader — `0x100CD0E0–0x100CD1C2`. Вторая последовательн�
 
 ## Контрольный пример: svin.ds2md
 
-Путь: [gameres/models/actors/svin.ds2md](../gameres/models/actors/svin.ds2md). Версия `1.0`, имя модели `Object01`, материал `model_actor`. SHA-256: `f03993dac2ef8498032f270bfb9be01cd37c929430e7595679a2e5c0d0d24264`.
+Путь в установленной игре: `gameres/models/actors/svin.ds2md`. Версия `1.0`, имя модели `Object01`, материал `model_actor`. SHA-256: `f03993dac2ef8498032f270bfb9be01cd37c929430e7595679a2e5c0d0d24264`.
 
 | Блок | Смещение от начала файла | Содержимое |
 |---|---:|---|
@@ -587,7 +587,7 @@ Reader — `0x100CD0E0–0x100CD1C2`. Вторая последовательн�
 
 Все записанные пути `.tga` существуют. Для 422 ссылок `.dds` найдены локальные файлы; ещё 26 используют старые абсолютные или относительные пути, среди них `Y:\GAMERES\ANIMALS\RAT.DDS`, `KUST_1.DDS`, `PLECH1.DDS`. Ни одно имя `.dds` не начинается с `gameres`: локальные копии обычно находятся рядом с моделью.
 
-Qt-viewer также читает `diffuse_texture_transform` по имени материала из общего `.mat` parser; остальные свойства model appearance этим не меняются. Семантика scroll/rotate, источник времени и ограничение GLB описаны в [разделе материалов DS2](DS2_RESEARCH.md#diffuse_texture_transform).
+Qt-viewer также читает `diffuse_texture_transform` по имени материала из общего `.mat` parser; остальные свойства model appearance этим не меняются. Семантика scroll/rotate, источник времени и ограничение GLB описаны в [разделе материалов DS2](ds2.md#diffuse_texture_transform).
 
 ## Указатель основных функций
 

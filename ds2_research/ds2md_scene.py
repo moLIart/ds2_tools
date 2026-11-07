@@ -78,7 +78,7 @@ def _strip_triangles(
 
 def _texture_index() -> dict[str, list[Path]]:
     """Index only the game's local texture tree, never serialized source paths."""
-    root = Path(__file__).resolve().parent.parent / 'gameres' / 'textures'
+    root = Path(__file__).resolve().parents[2] / 'gameres' / 'textures'
     images: dict[str, list[Path]] = {}
     for path in root.rglob('*'):
         if path.suffix.casefold() in ('.dds', '.tga') and path.is_file():

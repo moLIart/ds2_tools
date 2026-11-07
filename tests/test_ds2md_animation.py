@@ -4,10 +4,7 @@ import math
 import struct
 import unittest
 
-if __package__:
-    from .ds2md_animation import Animator, load_skeleton
-else:
-    from ds2md_animation import Animator, load_skeleton
+from ds2_research.ds2md_animation import Animator, load_skeleton
 
 
 IDENTITY = (1., 0., 0., 0., 0., 1., 0., 0.,

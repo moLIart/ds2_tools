@@ -1,6 +1,6 @@
 """Package native Qt viewer sources; never include game assets or build output.
 
-Run: python path/to/ds2_research/package_viewer.py [--output viewer.zip]
+Run: python tools/package_viewer.py [--output viewer.zip]
 The recipient builds with Qt 6.11 and a compatible C++ toolchain.
 Python is used only by this packaging utility, not by either viewer.
 """
@@ -13,10 +13,11 @@ from tempfile import NamedTemporaryFile
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
-SOURCE_DIR = Path(__file__).resolve().parent
+SOURCE_DIR = Path(__file__).resolve().parent.parent
 RUNTIME_FILES = (
     'CMakeLists.txt',
     'build.ps1',
+    'install.ps1',
     'viewer/main.cpp',
     'viewer/scene.h',
     'viewer/camera.h',
@@ -24,6 +25,8 @@ RUNTIME_FILES = (
     'viewer/model_loader.cpp',
     'viewer/model_animation.cpp',
     'viewer/model_animation.h',
+    'viewer/material.cpp',
+    'viewer/material.h',
     'viewer/glb_export.h',
     'viewer/glb_export.cpp',
     'viewer/glb_animation.cpp',

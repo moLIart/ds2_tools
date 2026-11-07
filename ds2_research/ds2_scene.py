@@ -10,7 +10,10 @@ import math
 import re
 import struct
 
-from inspect_ds2 import parse_map
+if __package__:
+    from .inspect_ds2 import parse_map
+else:
+    from inspect_ds2 import parse_map
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +231,7 @@ def load_map_scene(path, texture_index=None, materials=None):
     metadata = parse_map(path, data)
     # A map copied elsewhere can still use the adjacent game's resources.
     game = next((p.parent for p in path.parents if p.name.casefold() == 'gameres'),
-                Path(__file__).resolve().parent.parent)
+                Path(__file__).resolve().parents[2])
     texture_index = texture_index or TextureIndex(game / 'gameres' / 'textures')
     materials = materials if materials is not None else read_materials(game / 'gameres' / 'materials')
     warnings, albedos = [], {}

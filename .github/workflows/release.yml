@@ -24,6 +24,8 @@ jobs:
           version: '6.11.0'
           arch: 'win64_msvc2022_64'
           modules: 'qtshadertools'
+          # Qt 6.11 split its Windows repositories; aqtinstall 3.3.0 lacks support.
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@f383b3c7d9658e881bd8ce8810057393bd934ee1'
           tools: 'tools_ninja'
           cache: true
 
